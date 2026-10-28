@@ -1,0 +1,1722 @@
+<?php
+// lock_adv.php echoes HTML before the checks below can run, which would
+// corrupt the binary file stream in the download branch further down - so
+// buffer it here (same trick as okr/download.php) and discard it there;
+// for normal page loads the buffer just flows through untouched at the end.
+ob_start();
+require_once('../lock_adv.php');
+$connect = 1;
+date_default_timezone_set('Asia/Kuala_Lumpur');
+include('../common/index_adv.php');
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die("Database connection not available.");
+}
+require_once('aap_lib.php');
+
+// Resolves the SuperAdmin/admin-level union used across every AAP page.
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
+
+$id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+$case = $id ? aapFetchCase($conn, $id) : null;
+if (!$case) {
+    die("Case not found.");
+}
+
+// Visibility scope check (mirrors index.php's aapScopeWhere) - keyed off
+// the Case Type's own department (what the case is actually about), not
+// requester_department_id (just whoever happened to raise it - see
+// aapScopeWhere() in aap_lib.php for why).
+$can_view = $aap_is_admin
+    || aapIsOperations($aap_dept_ids)
+    || (int)$case['created_by'] === (int)$id_user
+    || in_array((int)$case['case_type_department_id'], $aap_dept_ids, true);
+if (!$can_view) {
+    die("You do not have access to this case.");
+}
+
+// Opening this case (however the viewer got here - a notification click,
+// the Case Queue, a direct link) clears every one of their own unread
+// notifications about it, not just one they happened to click through - see
+// aapMarkCaseNotificationsRead() in aap_lib.php.
+aapMarkCaseNotificationsRead($conn, $id, $id_user);
+
+// Needed ahead of the download branch below (execution attachments are
+// gated on this, not on general case visibility) - the rest of the
+// execution-eligibility logic near $can_close/$can_void stays where it is
+// further down, this is just pulled forward for the download gate.
+// Mirrors aapCanApprove()'s own value - the approved amount (falling back
+// to the originally calculated one if somehow not set) is what's actually
+// being executed, not the pre-approval figure.
+$can_execute = aapCanExecute($conn, $id_user, $case['case_type_id'], $case['approved_value'] ?: $case['calculated_value'], $aap_is_admin, $case['requester_department_id']);
+
+// ---- File download (evidence attachment) ----
+if (isset($_GET['download'])) {
+    $att_id = (int)$_GET['download'];
+    $stmt = $conn->prepare("SELECT * FROM aap_case_attachments WHERE id = ? AND case_id = ?");
+    $stmt->bind_param("ii", $att_id, $id);
+    $stmt->execute();
+    $att = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if ($att) {
+        $content = corpNasConnect()->download($att['stored_name']);
+        if ($content !== false) {
+            ob_end_clean();
+            header('Content-Description: File Transfer');
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . basename($att['file_name']) . '"');
+            header('Content-Length: ' . strlen($content));
+            echo $content;
+            exit;
+        }
+    }
+    die("Attachment not found.");
+}
+
+// ---- File download (execution-only attachment) - this Case Type's Level 3
+// Execution Team only, even if they can otherwise view the case; see
+// aapCanExecute(). ----
+if (isset($_GET['download_exec'])) {
+    if (!$can_execute) {
+        die("You do not have access to this attachment.");
+    }
+    $att_id = (int)$_GET['download_exec'];
+    $stmt = $conn->prepare("SELECT * FROM aap_case_execution_attachments WHERE id = ? AND case_id = ?");
+    $stmt->bind_param("ii", $att_id, $id);
+    $stmt->execute();
+    $att = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if ($att) {
+        $content = corpNasConnect()->download($att['stored_name']);
+        if ($content !== false) {
+            ob_end_clean();
+            header('Content-Description: File Transfer');
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . basename($att['file_name']) . '"');
+            header('Content-Length: ' . strlen($content));
+            echo $content;
+            exit;
+        }
+    }
+    die("Attachment not found.");
+}
+
+$ct = aapFetchCaseType($conn, $case['case_type_id']);
+$fixit_record = !empty($case['fixit_record_id']) ? aapFetchFixitRecord($conn, $case['fixit_record_id']) : null;
+
+// Only while the case is still active (draft/open) - a rejected/voided/
+// closed case is terminal and must not accept a physical tag/confirm after
+// the fact, even though physical_confirm_status itself may still read
+// 'pending' (voiding a case never touches that field).
+$can_tag_physical = in_array($case['case_status'], ['draft', 'open'], true)
+    && ($case['requester_type'] === 'outlet' || $case['requester_type'] === 'customer') && ((int)$case['created_by'] === (int)$id_user || aapIsOperations($aap_dept_ids) || $aap_is_admin);
+
+// Approval eligibility is now per-Case-Type: a staff member must be on that
+// Case Type's Approval Staff Tier list (Level 2, admin/aap_admin.php) with a
+// tier covering the case's value, and not on its Exclusion list (Level 3) -
+// see aapCanApprove(). Customer Support is the one deliberate exception -
+// they raise and self-handle their own cases at any value, so the person who
+// raised it can always act on it if they're Customer Support, without
+// needing to be on the Case Type's Staff Tier list at all.
+$can_act_approval = (aapIsCustomerSupport($aap_dept_ids) && (int)$case['created_by'] === (int)$id_user)
+    || aapCanApprove($conn, $id_user, $case['case_type_id'], $case['calculated_value'], $aap_is_admin, $case['requester_department_id']);
+// $can_execute itself is computed earlier (before the download branches).
+$can_close   = $aap_is_admin || aapIsOperations($aap_dept_ids) || (int)$case['created_by'] === (int)$id_user;
+// Once a case has ever been suspended (Execution sending it back to
+// Verification/Approval), it's already past the point Reject makes sense
+// for - it previously reached a decision, so Reject is retired for it even
+// while approval_status is back to 'pending' during the redo; Void from the
+// approver's side of the workflow no longer applies.
+$can_void    = (in_array($case['case_status'], ['draft', 'open'], true) && $case['approval_status'] === 'pending'
+                   && (int)$case['suspend_count'] === 0)
+               && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
+
+// Draft: a new case sits here first so the issuer/CS team has time to
+// gather evidence before it's opened for the approval workflow. Only the
+// issuer or admin can open it, same population as $can_edit_case below.
+$can_open_case = $case['case_status'] === 'draft'
+               && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
+
+// Active: Open Case (and, for a Case Type that requires it, physical
+// verification afterward) no longer drops a case straight onto an
+// approver's desk - it lands here first, still fully in the requester's own
+// hands, until they explicitly click Submit for Approval. Same population
+// as Open Case (issuer or admin). $physical_ready mirrors the Approve/
+// Reject gate's own check further down.
+$physical_ready = !$case['physical_confirm_required'] || in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
+$can_submit_for_approval = $case['case_status'] === 'open'
+               && empty($case['submitted_for_approval'])
+               && $physical_ready
+               && $case['approval_status'] === 'pending'
+               && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
+
+// Case Summary, and existing evidence (notes/attachments), are only
+// editable/removable before a decision is made and before the
+// physical-return workflow has actually started (RFID tagged/confirmed) —
+// changing the Case Type mid-flight after tagging would desync the physical
+// confirmation gate from whatever the new Case Type expects, and once the
+// case reaches the Approval stage the approver is reviewing exactly what's
+// there, so it must stop shifting underneath them. Also editable while still
+// a Draft/Active, since that's exactly when evidence is being gathered -
+// approval_status alone isn't enough to tell Active apart from actually
+// being at the Approval gate (it stays 'pending' through both), hence the
+// explicit submitted_for_approval check.
+$can_edit_case = (in_array($case['case_status'], ['draft', 'open'], true) && $case['approval_status'] === 'pending'
+                   && empty($case['submitted_for_approval'])
+                   && in_array($case['physical_confirm_status'], ['not_required', 'pending'], true))
+               && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
+
+// Adding *new* evidence (notes/attachments) stays open across every phase
+// of the case's life - Investigation, Verification, Approval, Execution -
+// right up until it's actually finished (closed/rejected/voided). Page
+// access itself ($can_view, checked at the very top of this file) already
+// limits who ever reaches this point, so no further population check is
+// needed here. Editing/removing what's already there is a separate, much
+// narrower question - see aapCaseEvidenceItemEditable()/
+// $case_phase_started_at below.
+$can_add_evidence = !in_array($case['case_status'], ['closed', 'rejected', 'voided'], true);
+
+// Start of whichever phase the case is CURRENTLY in - an item is only
+// editable/removable by its own author if it was added during this same
+// phase (see aapCaseEvidenceItemEditable() in aap_lib.php); anything carried
+// over from an earlier phase (e.g. added during Approval) freezes the
+// moment the case moves into the next one (e.g. Execution), even for its
+// own author. Null for a terminal case, which aapCaseEvidenceItemEditable()
+// already short-circuits via $can_add_evidence above.
+$case_phase_started_at = aapCaseCurrentPhaseStartedAt($conn, $case);
+
+// The "original note" (aap_cases.evidence_note, captured at raise time) is
+// its own item for freeze purposes, same as any other note/attachment - it
+// was added during the Investigation phase, by the case's creator, so it
+// follows the exact same current-phase-only rule instead of the broader
+// $can_edit_case window (which covers the rest of Case Summary and stays
+// open through all of Approval when there's no physical return step).
+// Without this it stayed editable straight through Approval whenever
+// physical_confirm_required was 0, contradicting the freeze everywhere else.
+$original_note_editable = aapCaseEvidenceItemEditable((int)$case['created_by'], $case['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at);
+
+// "Form Master" (admin/aap_settings.php) - single global Show/Hide,
+// Required/Optional, Label config, UNLESS this case's Case Type has its own
+// "Instruction for User" list, in which case it fully REPLACES Form
+// Master's field set (see aapCaseTypeReplaceFieldConfig() in aap_lib.php) -
+// same as aap_add.php. Based on the CASE's current case_type_id at page
+// load; a genuine Case Type change mid-edit is still validated/saved
+// correctly server-side (see the edit_case/open_case handlers below), it
+// just doesn't dynamically re-render the on-page field set.
+$form_master_config = aapFetchFormMasterConfig($conn);
+$current_ct = aapFetchCaseType($conn, $case['case_type_id']);
+$ordered_points = $current_ct ? aapCaseTypeFieldOrder($current_ct) : [];
+$field_cfg = aapCaseTypeReplaceFieldConfig($form_master_config, $ordered_points);
+$instruction_answers_by_key = [];
+foreach (aapFetchCaseInstructionAnswers($conn, $id) as $ia) {
+    $instruction_answers_by_key[$ia['point_key']] = $ia['point_value'];
+}
+// When the Instruction for User list names Bank Name/Account Number/
+// Holder, those render inside the Case Summary ordered list instead of
+// Bank Detail's own card (see "Bank Detail pun sekali kena replace/
+// reorder" - confirmed) - Bank Detail skips them here to avoid showing the
+// same field twice.
+$bank_fields_matched_in_order = [];
+foreach ($ordered_points as $op) {
+    if (in_array($op['matched_field_key'], ['bank_name', 'bank_account_number', 'bank_account_holder'], true)) {
+        $bank_fields_matched_in_order[$op['matched_field_key']] = true;
+    }
+}
+// Whole Bank Detail card is pointless to show when a Case Type's
+// Instruction for User list exists but doesn't mention any of its 3
+// fields - no list at all (today's default) always shows it.
+$show_bank_detail_card = empty($ordered_points) || !empty($bank_fields_matched_in_order);
+
+// "Additional Fields" (admin/aap_settings.php's Form Master section) -
+// admin-defined custom fields. $active_custom_fields drives the edit form
+// (only currently-active fields are editable) and the save handlers below;
+// $display_custom_fields drives the read-only view card (every active field
+// plus any retired field this case already has an answer for).
+$active_custom_fields = aapFetchActiveCustomFields($conn);
+$display_custom_fields = aapFetchCaseCustomFieldsForDisplay($conn, $id);
+
+$msg = "";
+$msg_type = "";
+
+// Flash message from the previous POST (see the redirect at the end of the
+// action handler below) - shown once, then cleared, so a page refresh never
+// re-shows it or resubmits the form.
+if (isset($_SESSION['aap_flash_msg'])) {
+    $msg = $_SESSION['aap_flash_msg'];
+    $msg_type = $_SESSION['aap_flash_msg_type'];
+    unset($_SESSION['aap_flash_msg'], $_SESSION['aap_flash_msg_type']);
+}
+
+// ---- Approval remark auto-save (AJAX) - separate from the main POST/redirect
+// flow below since it must reply with JSON and not reload the page while the
+// user is still typing. Free text only, doesn't itself approve/correct/reject
+// - just keeps the draft remark saved so it isn't lost before a decision is made. ----
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'ajax_save_remark' && $can_act_approval && $case['case_status'] === 'open' && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
+    ob_end_clean();
+    header('Content-Type: application/json');
+    $remark_text = trim($_POST['remark'] ?? '');
+    $stmt = $conn->prepare("UPDATE aap_cases SET approval_remark = ? WHERE id = ?");
+    $stmt->bind_param("si", $remark_text, $id);
+    $stmt->execute(); $stmt->close();
+    echo json_encode(['success' => true]);
+    exit;
+}
+
+// ---- Action handler ----
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
+    $now = date('Y-m-d H:i:s');
+    // Appended to $msg just before the flash-redirect below, by whichever
+    // branch calls aapUploadEvidenceFiles()/aapUploadExecutionAttachments() -
+    // see aapUploadFailureNote() in aap_lib.php.
+    $aap_upload_warning = '';
+
+    // Per-Case-Type "Instruction for User" extra fields - re-derived from
+    // the SUBMITTED case_type_id (never trust the page's on-load
+    // $ordered_points alone - the admin may have genuinely changed Case
+    // Type in this same edit_case/open_case submission). '.' -> '_'
+    // translation matches js/aap_add.js's applyCaseDetailsLayout()/
+    // aap_add.php's own $instruction_answers_posted.
+    $submitted_ct = aapFetchCaseType($conn, (int)($_POST['case_type_id'] ?? $case['case_type_id']));
+    $submitted_ordered_points = $submitted_ct ? aapCaseTypeFieldOrder($submitted_ct) : [];
+    $submitted_extra_fields = array_values(array_filter($submitted_ordered_points, function ($p) { return $p['matched_field_key'] === null; }));
+    $submitted_instruction_answers = [];
+    foreach ($_POST['instruction_answer'] ?? [] as $k => $v) {
+        $submitted_instruction_answers[str_replace('_', '.', $k)] = $v;
+    }
+
+    if ($action === 'open_case' && $can_open_case && ($custom_field_error = aapValidateCustomFieldSubmission($active_custom_fields, $_POST['custom_field'] ?? [])) !== null) {
+        $msg = $custom_field_error; $msg_type = "alpro-danger";
+    } elseif ($action === 'open_case' && $can_open_case && ($instruction_field_error = aapValidateExtraInstructionFields($submitted_extra_fields, $submitted_instruction_answers)) !== null) {
+        $msg = $instruction_field_error; $msg_type = "alpro-danger";
+    } elseif ($action === 'open_case' && $can_open_case) {
+        // Open Case now submits the Case Summary (case-edit) form itself, so
+        // save those fields first - the requester no longer has to click
+        // Save Changes in a separate step before this button unlocks.
+        $updated = aapSaveCaseEditFields($conn, $id, $case, $_POST, $now);
+        if ($updated === null) {
+            $msg = "Invalid or retired Case Type selected."; $msg_type = "alpro-danger";
+        } else {
+            aapSaveCaseCustomValues($conn, $id, $active_custom_fields, $_POST['custom_field'] ?? []);
+            aapSaveCaseInstructionAnswers($conn, $id, $submitted_extra_fields, $submitted_instruction_answers);
+            $aap_upload_warning .= aapUploadFailureNote(aapUploadEvidenceFiles($conn, $id, $_FILES['evidence'] ?? null, $id_user, $now));
+            $new_note = trim($_POST['new_note'] ?? '');
+            if ($new_note !== '') {
+                aapAddCaseNote($conn, $id, $new_note, $id_user);
+                aapLogAudit($conn, $id, 'note_added', $id_user, "Added a note");
+            }
+            aapLogAudit($conn, $id, 'case_edited', $id_user, "Case details updated (" . $updated['case_type_name'] . ")");
+
+            $missing = aapCaseOpenReadyErrors($updated);
+            if (!empty($missing)) {
+                $msg = "Fill in all required fields before opening this case: " . implode(', ', $missing) . "."; $msg_type = "alpro-danger";
+            } else {
+                $stmt = $conn->prepare("UPDATE aap_cases SET case_status='open', updated_at=? WHERE id=?");
+                $stmt->bind_param("si", $now, $id);
+                $stmt->execute(); $stmt->close();
+                aapLogAudit($conn, $id, 'case_opened', $id_user, "Case opened — evidence gathering complete.");
+                // Opening no longer notifies approvers itself, even when
+                // there's no physical step to wait on - the case lands in
+                // Active first, and only the separate 'submit_for_approval'
+                // action (below) actually puts it in front of an approver.
+                $msg = "Case opened."; $msg_type = "alpro-success";
+            }
+        }
+    } elseif ($action === 'tag_physical' && $can_tag_physical && $case['case_status'] === 'open' && $case['physical_confirm_status'] === 'pending') {
+        // Tag + confirm in one step - the separate "Confirm Receipt at ACMM
+        // (Reverse Team)" action was merged in here, so entering the RFID
+        // reference takes the case straight to 'confirmed' and on to Active,
+        // instead of sitting in an intermediate 'tagged' state.
+        $ref = trim($_POST['physical_confirm_ref']);
+        if ($ref === '') {
+            $msg = "RFID / tag reference is required."; $msg_type = "alpro-danger";
+        } else {
+            $stmt = $conn->prepare("UPDATE aap_cases SET physical_confirm_status='confirmed', physical_confirm_ref=?, physical_tagged_by=?, physical_tagged_at=?, physical_confirmed_by=?, physical_confirmed_at=?, updated_at=? WHERE id=?");
+            $stmt->bind_param("sisissi", $ref, $id_user, $now, $id_user, $now, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'physical_confirmed', $id_user, "Item tagged and confirmed (ref: $ref).");
+            // Physical confirmation is the last manual step for a case that
+            // needed it - immediately also submit for approval (same as the
+            // non-physical path auto-submits right at raise time), closing
+            // the gap that used to require a separate Submit for Approval
+            // click. aapSubmitCaseForApproval() is the one place eligible
+            // approvers ever get notified (aap_lib.php).
+            aapSubmitCaseForApproval($conn, $id, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id'], $id_user, $now);
+            $msg = "Item tagged and confirmed. Submitted for approval."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'submit_for_approval' && $can_submit_for_approval) {
+        // Manual fallback - normal cases are auto-submitted at raise time or
+        // right after physical confirmation (see aap_add.php / the
+        // 'tag_physical' branch above), so this button shouldn't usually be
+        // needed, but stays available for the rare case that somehow still
+        // reaches Active without having been auto-submitted.
+        aapSubmitCaseForApproval($conn, $id, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id'], $id_user, $now);
+        $msg = "Case submitted for approval. Approvers notified."; $msg_type = "alpro-success";
+    } elseif (in_array($action, ['approve', 'reject'], true) && $can_act_approval && $case['case_status'] === 'open' && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
+        $physical_ok = in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
+        if (!$physical_ok) {
+            $msg = "This case cannot be decided until the physical return is confirmed."; $msg_type = "alpro-danger";
+        } else {
+            $remark = trim($_POST['approval_remark']);
+            if ($action === 'approve') {
+                // One Approve action - the Approved Value field is pre-filled with
+                // calculated_value but editable, so an approver can adjust it
+                // (what used to be the separate "Correct" action) without a second button.
+                $approved_value = ($_POST['approved_value'] !== '') ? (float)$_POST['approved_value'] : (float)$case['calculated_value'];
+                $was_adjusted = abs($approved_value - (float)$case['calculated_value']) > 0.001;
+                // Report Description is only mandatory when something needs
+                // explaining - a straight approval at the requested value
+                // speaks for itself, but overriding the amount always needs a
+                // reason on record.
+                if ($was_adjusted && $remark === '') {
+                    $msg = "Report Description is required when adjusting the Approved Value."; $msg_type = "alpro-danger";
+                } else {
+                $stmt = $conn->prepare("UPDATE aap_cases SET approval_status='approved', approved_value=?, approver_staff_id=?, approved_at=?, approval_remark=?, updated_at=? WHERE id=?");
+                $stmt->bind_param("disssi", $approved_value, $id_user, $now, $remark, $now, $id);
+                $stmt->execute(); $stmt->close();
+                $audit_summary = "Approved" . ($was_adjusted ? " (value adjusted to " . aapFormatValue($approved_value, $case['value_type']) . ")" : "") . ($remark ? " — $remark" : "");
+                aapLogAudit($conn, $id, 'case_approved', $id_user, $audit_summary, ['approved_value' => $approved_value]);
+                aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_approved');
+                $msg = "Case approved. Requester notified."; $msg_type = "alpro-success";
+                }
+            } elseif ($action === 'reject') {
+                // Rejecting always needs a reason on record - unlike a
+                // straight approval, there's no "speaks for itself" default.
+                if ($remark === '') {
+                    $msg = "Report Description is required when rejecting a case."; $msg_type = "alpro-danger";
+                } else {
+                $stmt = $conn->prepare("UPDATE aap_cases SET approval_status='rejected', approver_staff_id=?, approved_at=?, approval_remark=?, case_status='rejected', closed_at=?, updated_at=? WHERE id=?");
+                $stmt->bind_param("issssi", $id_user, $now, $remark, $now, $now, $id);
+                $stmt->execute(); $stmt->close();
+                aapLogAudit($conn, $id, 'case_rejected', $id_user, "Rejected" . ($remark ? " — $remark" : ""));
+                aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_rejected');
+                // AAP-LINK: case ends negatively - auto-cancel the linked Fixit
+                // ticket instead of leaving it stuck Pending forever.
+                if (!empty($case['fixit_record_id'])) {
+                    aapCancelLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+                }
+                $msg = "Case rejected. Requester notified."; $msg_type = "alpro-success";
+                }
+            }
+        }
+    } elseif ($action === 'suspend_case_approval' && $can_act_approval && $case['case_status'] === 'open' && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
+        // Approval's own Suspend Case - same mechanic as Execution's (see
+        // 'suspend_case' below), just one stage earlier: instead of
+        // deciding, Approval can send the case back for more evidence.
+        // approval_status stays 'pending' (nothing to reset there - it never
+        // left pending); submitted_for_approval resets to 0 - the case drops
+        // back to Active and the requester has to click Submit for Approval
+        // again after fixing things, rather than it silently sitting back on
+        // an approver's desk unchanged. The physical-confirm gate reopens
+        // too when this Case Type has one; a Case Type with no physical step
+        // at all has nowhere earlier to send it back to, so
+        // physical_confirm_status just stays 'not_required'. Either way,
+        // suspended_at bumps forward so evidence-freeze/turnaround timing
+        // starts fresh from here (see aapCaseCurrentPhaseStartedAt() in
+        // aap_lib.php), and suspend_count increments the same audit trail
+        // Execution's suspend feeds.
+        $suspend_reason = trim($_POST['suspend_reason'] ?? '');
+        if ($suspend_reason === '') {
+            $msg = "A reason is required to suspend this case."; $msg_type = "alpro-danger";
+        } else {
+            $new_physical_status = (int)$case['physical_confirm_required'] === 1 ? 'pending' : 'not_required';
+            $stmt = $conn->prepare("
+                UPDATE aap_cases SET
+                    physical_confirm_status = ?,
+                    submitted_for_approval = 0,
+                    suspended_at = ?, suspended_by = ?, suspend_reason = ?, suspend_count = suspend_count + 1, suspended_stage = 'approval', updated_at = ?
+                WHERE id = ?
+            ");
+            $stmt->bind_param("ssissi", $new_physical_status, $now, $id_user, $suspend_reason, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Approval: $suspend_reason. Case sent back to Active for more evidence.");
+            aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_suspended');
+            $msg = "Case suspended. Requester notified."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'execute' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
+        // Execute and Close are separate steps/actions again - this only
+        // marks the case executed (case_status='executed', a real waiting
+        // state, not a legacy value collapsed into 'closed'). The requester
+        // isn't notified and the linked Fixit ticket isn't completed until
+        // the separate "Notify Requester & Close Case" step below actually
+        // runs (the 'close' action) - executing alone doesn't finish the
+        // case.
+        $exec_ref = trim($_POST['execution_reference']);
+        if ($exec_ref === '') {
+            $msg = "Execution reference is required."; $msg_type = "alpro-danger";
+        } else {
+            $stmt = $conn->prepare("UPDATE aap_cases SET execution_status='executed', execution_reference=?, executor_staff_id=?, executed_at=?, case_status='executed', updated_at=? WHERE id=?");
+            $stmt->bind_param("sissi", $exec_ref, $id_user, $now, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'case_executed', $id_user, "Executed (ref: $exec_ref). Ready to close.");
+            $msg = "Case executed. Close the case below to notify the requester and finish."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'execute_and_close' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
+        // Shortcut for whoever can execute to do both steps in one click,
+        // instead of Execute now and coming back later for the separate
+        // "Notify Requester & Close Case" step - same two updates as the
+        // 'execute' and 'close' actions above, just run back to back in one
+        // request rather than requiring a second page visit.
+        $exec_ref = trim($_POST['execution_reference']);
+        if ($exec_ref === '') {
+            $msg = "Execution reference is required."; $msg_type = "alpro-danger";
+        } else {
+            $stmt = $conn->prepare("UPDATE aap_cases SET execution_status='executed', execution_reference=?, executor_staff_id=?, executed_at=?, case_status='closed', closed_at=?, updated_at=? WHERE id=?");
+            $stmt->bind_param("sisssi", $exec_ref, $id_user, $now, $now, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'case_executed', $id_user, "Executed (ref: $exec_ref).");
+            aapLogAudit($conn, $id, 'case_closed', $id_user, "Case closed and requester notified.");
+            aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_closed');
+            if (!empty($case['fixit_record_id'])) {
+                aapCompleteLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+            }
+            $msg = "Case executed and closed. Requester notified."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'suspend_case' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
+        // Execution can send a case back to Verification/Approval instead of
+        // executing it - e.g. not enough evidence surfaced to actually carry
+        // out the payout. Never goes back to Draft (case_status stays
+        // 'open') - the requester picks up editing from Verification/
+        // Approval, not from raw scratch.
+        //
+        // Only the three status enums reset to pending/not_required - who
+        // tagged/confirmed/approved/executed last time, and their
+        // remark/reference, are deliberately left in place rather than
+        // nulled out, so that history stays visible (aap_update.php's
+        // "Tagged & confirmed by.../Approved by..." meta lines) right up
+        // until the case actually gets tagged/approved/executed again, at
+        // which point the normal action handlers overwrite them with the
+        // new attempt's values same as always. Evidence/notes/attachments
+        // added before this moment stay frozen forever regardless
+        // (aapCaseCurrentPhaseStartedAt() floors the edit window at
+        // suspended_at, see aap_lib.php), even for their own author, even
+        // once that same person is back in a phase they could normally edit.
+        $suspend_reason = trim($_POST['suspend_reason'] ?? '');
+        if ($suspend_reason === '') {
+            $msg = "A reason is required to suspend this case."; $msg_type = "alpro-danger";
+        } else {
+            $new_physical_status = (int)$case['physical_confirm_required'] === 1 ? 'pending' : 'not_required';
+            $stmt = $conn->prepare("
+                UPDATE aap_cases SET
+                    physical_confirm_status = ?,
+                    approval_status = 'pending',
+                    execution_status = 'pending',
+                    submitted_for_approval = 0,
+                    suspended_at = ?, suspended_by = ?, suspend_reason = ?, suspend_count = suspend_count + 1, suspended_stage = 'execution', updated_at = ?
+                WHERE id = ?
+            ");
+            $stmt->bind_param("ssissi", $new_physical_status, $now, $id_user, $suspend_reason, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Execution: $suspend_reason. Case sent back to Active.");
+
+            // Drops back to Active, not straight back onto an approver's
+            // desk - only the requester is told now; approvers hear about it
+            // again once the requester re-submits ('submit_for_approval').
+            aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_suspended');
+
+            $msg = "Case suspended and sent back to Active. Requester notified."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'add_execution_attachment' && $can_execute) {
+        // Lets the executor attach more files after the fact (e.g. a later
+        // confirmation screenshot) without needing to redo the Execute step -
+        // same pattern as 'add_evidence' for the general Evidence Attachments
+        // card.
+        $exec_upload_result = aapUploadExecutionAttachments($conn, $id, $_FILES['execution_evidence'] ?? null, $id_user, $now);
+        if ($exec_upload_result['uploaded'] > 0) {
+            aapLogAudit($conn, $id, 'execution_attachment_added', $id_user, "Execution attachment(s) added");
+            $msg = "Execution attachment added."; $msg_type = "alpro-success";
+        } elseif ($exec_upload_result['attempted'] > 0) {
+            $msg = "Upload failed — check your connection and try again."; $msg_type = "alpro-danger";
+        } else {
+            $msg = "Nothing to add — choose a file first."; $msg_type = "alpro-warn";
+        }
+    } elseif ($action === 'delete_execution_attachment' && $can_execute) {
+        $att_id = (int)($_POST['attachment_id'] ?? 0);
+        $stmt = $conn->prepare("SELECT * FROM aap_case_execution_attachments WHERE id = ? AND case_id = ?");
+        $stmt->bind_param("ii", $att_id, $id);
+        $stmt->execute();
+        $att = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($att) {
+            $dstmt = $conn->prepare("DELETE FROM aap_case_execution_attachments WHERE id = ?");
+            $dstmt->bind_param("i", $att_id);
+            $dstmt->execute(); $dstmt->close();
+            aapLogAudit($conn, $id, 'execution_attachment_removed', $id_user, "Removed execution attachment: " . $att['file_name']);
+            $msg = "Execution attachment removed."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'toggle_execution_attachment_fixit' && $can_execute) {
+        // Opt-in per file - lets a specific execution attachment also
+        // surface on the originating Fixit ticket's own page (see
+        // execution_attachment_shared.php and fixit/index_specific.php's
+        // "AAP Case Progression" widget), instead of exposing every
+        // execution attachment there by default.
+        $att_id = (int)($_POST['attachment_id'] ?? 0);
+        $show = isset($_POST['show_in_fixit']) ? 1 : 0;
+        $stmt = $conn->prepare("SELECT file_name FROM aap_case_execution_attachments WHERE id = ? AND case_id = ?");
+        $stmt->bind_param("ii", $att_id, $id);
+        $stmt->execute();
+        $att = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($att) {
+            $ustmt = $conn->prepare("UPDATE aap_case_execution_attachments SET show_in_fixit = ? WHERE id = ?");
+            $ustmt->bind_param("ii", $show, $att_id);
+            $ustmt->execute(); $ustmt->close();
+            aapLogAudit($conn, $id, 'execution_attachment_fixit_visibility', $id_user, ($show ? "Shared" : "Unshared") . " with Fixit: " . $att['file_name']);
+            $msg = $show ? "Attachment will show on the Fixit ticket." : "Attachment hidden from the Fixit ticket."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'edit_case' && $can_edit_case && ($custom_field_error = aapValidateCustomFieldSubmission($active_custom_fields, $_POST['custom_field'] ?? [])) !== null) {
+        $msg = $custom_field_error; $msg_type = "alpro-danger";
+    } elseif ($action === 'edit_case' && $can_edit_case && ($instruction_field_error = aapValidateExtraInstructionFields($submitted_extra_fields, $submitted_instruction_answers)) !== null) {
+        $msg = $instruction_field_error; $msg_type = "alpro-danger";
+    } elseif ($action === 'edit_case' && $can_edit_case) {
+        // Requester Type / Requesting Channel are no longer collected on this
+        // form (removed to match aap_add.php) - Requester Type falls back to
+        // 'customer' (Case Type no longer carries its own
+        // default_requester_type); Requesting Channel keeps whatever the case
+        // already had. See aapSaveCaseEditFields() (aap_lib.php), shared with
+        // the 'open_case' action above.
+        $updated = aapSaveCaseEditFields($conn, $id, $case, $_POST, $now);
+        if ($updated === null) {
+            $msg = "Invalid or retired Case Type selected."; $msg_type = "alpro-danger";
+        } else {
+            aapSaveCaseCustomValues($conn, $id, $active_custom_fields, $_POST['custom_field'] ?? []);
+            aapSaveCaseInstructionAnswers($conn, $id, $submitted_extra_fields, $submitted_instruction_answers);
+            // Save Changes carries the Evidence Note/file fields too (moved
+            // into this form by JS on submit, see the case-edit-actions
+            // script below) - so evidence typed there isn't silently lost if
+            // the requester clicks Save Changes instead of Add Evidence.
+            $aap_upload_warning .= aapUploadFailureNote(aapUploadEvidenceFiles($conn, $id, $_FILES['evidence'] ?? null, $id_user, $now));
+            $new_note = trim($_POST['new_note'] ?? '');
+            if ($new_note !== '') {
+                aapAddCaseNote($conn, $id, $new_note, $id_user);
+                aapLogAudit($conn, $id, 'note_added', $id_user, "Added a note");
+            }
+
+            aapLogAudit($conn, $id, 'case_edited', $id_user, "Case details updated (" . $updated['case_type_name'] . ")");
+            $msg = "Case details updated."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'add_evidence' && $can_add_evidence) {
+        // Lets evidence (files/note/reference link) be saved on its own,
+        // without also having to fill in and resubmit the full Case Details
+        // form (edit_case above) just to attach a file.
+        $evidence_upload_result = aapUploadEvidenceFiles($conn, $id, $_FILES['evidence'] ?? null, $id_user, $now);
+
+        $new_note = trim($_POST['new_note'] ?? '');
+        if ($new_note !== '') {
+            aapAddCaseNote($conn, $id, $new_note, $id_user);
+            aapLogAudit($conn, $id, 'note_added', $id_user, "Added a note");
+        }
+
+        $new_link_url = trim($_POST['new_link_url'] ?? '');
+        $new_link_label = trim($_POST['new_link_label'] ?? '');
+        $link_added = false;
+        $link_error = null;
+        if ($new_link_url !== '') {
+            if (!filter_var($new_link_url, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $new_link_url)) {
+                $link_error = "Reference link must be a valid http(s):// URL.";
+            } else {
+                $link_label_final = $new_link_label !== '' ? $new_link_label : $new_link_url;
+                aapAddCaseReferenceLink($conn, $id, $new_link_url, $link_label_final, $id_user);
+                aapLogAudit($conn, $id, 'reference_link_added', $id_user, "Added a reference link: $link_label_final");
+                $link_added = true;
+            }
+        }
+
+        if ($link_error !== null) {
+            $msg = $link_error; $msg_type = "alpro-danger";
+        } elseif ($evidence_upload_result['uploaded'] > 0 || $new_note !== '' || $link_added) {
+            if ($evidence_upload_result['uploaded'] > 0) aapLogAudit($conn, $id, 'evidence_added', $id_user, "Evidence attachment(s) added");
+            $msg = "Evidence added."; $msg_type = "alpro-success";
+            $aap_upload_warning .= aapUploadFailureNote($evidence_upload_result);
+        } elseif ($evidence_upload_result['attempted'] > 0) {
+            $msg = "Upload failed — check your connection and try again."; $msg_type = "alpro-danger";
+        } else {
+            $msg = "Nothing to add — choose a file, write a note, or paste a link first."; $msg_type = "alpro-warn";
+        }
+    } elseif ($action === 'delete_reference_link' && $can_add_evidence) {
+        $link_id = (int)($_POST['link_id'] ?? 0);
+        $link = aapFetchCaseReferenceLink($conn, $link_id, $id);
+        if (!$link) {
+            $msg = "Reference link not found."; $msg_type = "alpro-danger";
+        } elseif (!aapCaseEvidenceItemEditable($link['created_by'], $link['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
+            $msg = "This reference link can no longer be removed."; $msg_type = "alpro-danger";
+        } else {
+            aapDeleteCaseReferenceLink($conn, $link_id, $id);
+            aapLogAudit($conn, $id, 'reference_link_removed', $id_user, "Removed reference link: " . $link['label']);
+            $msg = "Reference link removed."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'delete_attachment' && $can_add_evidence) {
+        $att_id = (int)($_POST['attachment_id'] ?? 0);
+        $stmt = $conn->prepare("SELECT * FROM aap_case_attachments WHERE id = ? AND case_id = ?");
+        $stmt->bind_param("ii", $att_id, $id);
+        $stmt->execute();
+        $att = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$att) {
+            $msg = "Attachment not found."; $msg_type = "alpro-danger";
+        } elseif (!aapCaseEvidenceItemEditable($att['uploaded_by'], $att['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
+            $msg = "This attachment can no longer be removed."; $msg_type = "alpro-danger";
+        } else {
+            corpNasConnect()->delete($att['stored_name']);
+            $dstmt = $conn->prepare("DELETE FROM aap_case_attachments WHERE id = ?");
+            $dstmt->bind_param("i", $att_id);
+            $dstmt->execute(); $dstmt->close();
+            aapLogAudit($conn, $id, 'attachment_removed', $id_user, "Removed attachment: " . $att['file_name']);
+            $msg = "Attachment removed."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'edit_case_note' && $can_add_evidence) {
+        $note_id = (int)($_POST['note_id'] ?? 0);
+        $note_text = trim($_POST['note'] ?? '');
+        $note = aapFetchCaseNote($conn, $note_id, $id);
+        if ($note_text === '') {
+            $msg = "Note cannot be empty."; $msg_type = "alpro-danger";
+        } elseif (!$note) {
+            $msg = "Note not found."; $msg_type = "alpro-danger";
+        } elseif (!aapCaseEvidenceItemEditable($note['created_by'], $note['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
+            $msg = "This note can no longer be edited."; $msg_type = "alpro-danger";
+        } else {
+            aapUpdateCaseNote($conn, $note_id, $id, $note_text);
+            aapLogAudit($conn, $id, 'note_edited', $id_user, "Edited a note");
+            $msg = "Note updated."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'delete_case_note' && $can_add_evidence) {
+        $note_id = (int)($_POST['note_id'] ?? 0);
+        $note = aapFetchCaseNote($conn, $note_id, $id);
+        if (!$note) {
+            $msg = "Note not found."; $msg_type = "alpro-danger";
+        } elseif (!aapCaseEvidenceItemEditable($note['created_by'], $note['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
+            $msg = "This note can no longer be removed."; $msg_type = "alpro-danger";
+        } else {
+            aapDeleteCaseNote($conn, $note_id, $id);
+            aapLogAudit($conn, $id, 'note_removed', $id_user, "Removed a note");
+            $msg = "Note removed."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'edit_original_note' && $original_note_editable) {
+        $note_text = trim($_POST['note'] ?? '');
+        if ($note_text === '') {
+            $msg = "Note cannot be empty."; $msg_type = "alpro-danger";
+        } else {
+            $stmt = $conn->prepare("UPDATE aap_cases SET evidence_note = ? WHERE id = ?");
+            $stmt->bind_param("si", $note_text, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'note_edited', $id_user, "Edited the original note");
+            $msg = "Note updated."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'delete_original_note' && $original_note_editable) {
+        $stmt = $conn->prepare("UPDATE aap_cases SET evidence_note = '' WHERE id = ?");
+        $stmt->bind_param("i", $id);
+        $stmt->execute(); $stmt->close();
+        aapLogAudit($conn, $id, 'note_removed', $id_user, "Removed the original note");
+        $msg = "Note removed."; $msg_type = "alpro-success";
+    } elseif ($action === 'close' && $can_close && $case['case_status'] === 'executed') {
+        $stmt = $conn->prepare("UPDATE aap_cases SET case_status='closed', closed_at=?, updated_at=? WHERE id=?");
+        $stmt->bind_param("ssi", $now, $now, $id);
+        $stmt->execute(); $stmt->close();
+        aapLogAudit($conn, $id, 'case_closed', $id_user, "Case closed and requester notified.");
+        // Notify the requester who raised the case - even if they're also the
+        // one closing it themselves.
+        aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_closed');
+        // AAP-LINK: auto-complete the linked Fixit ticket instead of relying
+        // on the requester to go complete it by hand.
+        if (!empty($case['fixit_record_id'])) {
+            aapCompleteLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+        }
+        $msg = "Case closed."; $msg_type = "alpro-success";
+    } elseif ($action === 'void_case' && $can_void) {
+        $void_reason = trim($_POST['void_reason'] ?? '');
+        $stmt = $conn->prepare("UPDATE aap_cases SET case_status='voided', closed_at=?, updated_at=? WHERE id=?");
+        $stmt->bind_param("ssi", $now, $now, $id);
+        $stmt->execute(); $stmt->close();
+        aapLogAudit($conn, $id, 'case_voided', $id_user, "Case voided" . ($void_reason ? " — $void_reason" : ""));
+        // AAP-LINK: case ends negatively - auto-cancel the linked Fixit
+        // ticket instead of leaving it stuck Pending forever.
+        if (!empty($case['fixit_record_id'])) {
+            aapCancelLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+        }
+        $msg = "Case voided."; $msg_type = "alpro-success";
+    } else {
+        $msg = "This action is not available for the case's current state, or you don't have permission to perform it.";
+        $msg_type = "alpro-danger";
+    }
+
+    // A failed file upload doesn't otherwise change $msg/$msg_type (the note/
+    // case-save/etc. half of the same submit can still have genuinely
+    // succeeded) - append it as a caveat instead of replacing the message,
+    // downgrading a success banner to a warning so it doesn't read as
+    // "everything worked" when a file silently didn't.
+    if ($aap_upload_warning !== '') {
+        $msg .= $aap_upload_warning;
+        if ($msg_type === 'alpro-success') $msg_type = 'alpro-warn';
+    }
+
+    // Post/Redirect/Get: bounce to a plain GET on the same case so a page
+    // refresh after submitting never resubmits the form or re-shows this
+    // message - it's carried across the redirect as a one-time session flash.
+    $_SESSION['aap_flash_msg'] = $msg;
+    $_SESSION['aap_flash_msg_type'] = $msg_type;
+    header('Location: aap_update.php?id=' . $id);
+    exit;
+}
+
+// ---- SOP progress stepper — [Verification Reference] -> Active -> Approval -> Execution -> Closed ----
+// No "Open Case" step any more - a case starts directly at 'open' (never
+// 'draft', see the "skip Draft" change elsewhere), so by the time anyone
+// ever sees this stepper it's already true/done with no real transition to
+// show - pure clutter. A historical pre-this-change draft case (none exist)
+// still gets its own "Draft - gathering evidence" alert further down the
+// page regardless of what the stepper shows.
+$aap_steps = [];
+
+$physical_ready = !$case['physical_confirm_required'] || in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
+if ($case['physical_confirm_required']) {
+    $pstate = ($case['case_status'] === 'draft') ? 'upcoming' : (($case['physical_confirm_status'] === 'confirmed') ? 'done' : 'current');
+    $aap_steps[] = ['label' => 'Verification Reference', 'sub' => aapPhysicalStatusLabel($case['physical_confirm_status']), 'state' => $pstate];
+}
+
+// Active - the requester's own holding stage between being ready and
+// actually reaching an approver (see $can_submit_for_approval above). Sits
+// 'current' once physical verification (if any) is done but the case hasn't
+// been submitted yet; 'done' once it has, even if it's later suspended back
+// here (submitted_for_approval resets to 0, so it becomes 'current' again).
+if ($case['case_status'] === 'draft' || !$physical_ready) {
+    $active_state = 'upcoming'; $active_sub = '';
+} elseif (in_array($case['case_status'], ['rejected', 'voided'], true)) {
+    $active_state = $case['submitted_for_approval'] ? 'done' : 'failed';
+    $active_sub = $case['submitted_for_approval'] ? '' : 'Rejected before submission';
+} elseif (empty($case['submitted_for_approval'])) {
+    $active_state = 'current'; $active_sub = 'Ready to submit';
+} else {
+    $active_state = 'done'; $active_sub = '';
+}
+$aap_steps[] = ['label' => 'Active', 'sub' => $active_sub, 'state' => $active_state];
+
+if ($case['case_status'] === 'draft') {
+    $astate = 'upcoming'; $asub = '';
+} elseif (in_array($case['case_status'], ['rejected', 'voided'], true)) {
+    $astate = 'failed'; $asub = 'Rejected';
+} elseif (in_array($case['approval_status'], ['approved', 'corrected'], true)) {
+    $astate = 'done'; $asub = 'Approved';
+} elseif ($case['approval_status'] === 'pending') {
+    $ready_for_approval = $physical_ready && $case['submitted_for_approval'];
+    $astate = $ready_for_approval ? 'current' : 'upcoming';
+    $asub = $ready_for_approval ? aapFormatValue($case['calculated_value'], $case['value_type']) : '';
+} else {
+    $astate = 'upcoming'; $asub = '';
+}
+$aap_steps[] = ['label' => 'Approval', 'sub' => $asub, 'state' => $astate];
+
+// Execution and Closed are separate steps again - executing a case
+// (aap_update.php's 'execute' action) now only sets execution_status/
+// case_status to 'executed' and stops there; a separate "Notify Requester &
+// Close Case" step (the 'close' action) is what actually finishes the case.
+if (in_array($case['case_status'], ['rejected', 'voided'], true)) {
+    $exec_state = 'upcoming';
+} elseif ($case['execution_status'] === 'executed') {
+    $exec_state = 'done';
+} elseif (in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
+    $exec_state = 'current';
+} else {
+    $exec_state = 'upcoming';
+}
+$aap_steps[] = ['label' => 'Execution', 'sub' => '', 'state' => $exec_state];
+
+if (in_array($case['case_status'], ['rejected', 'voided'], true)) {
+    $cstate = 'upcoming';
+} elseif ($case['case_status'] === 'closed') {
+    $cstate = 'done';
+} elseif ($case['case_status'] === 'executed') {
+    $cstate = 'current';
+} else {
+    $cstate = 'upcoming';
+}
+$aap_steps[] = ['label' => 'Closed', 'sub' => '', 'state' => $cstate];
+
+$attachments = [];
+$att_res = $conn->query("SELECT a.*, s.nama_staff AS uploaded_by_name
+                          FROM aap_case_attachments a
+                          LEFT JOIN staff s ON s.id = a.uploaded_by
+                          WHERE a.case_id = " . (int)$id . "
+                          ORDER BY a.timestamp ASC");
+while ($att_res && $row = $att_res->fetch_assoc()) $attachments[] = $row;
+
+// Execution-only attachments - only ever queried/rendered when the viewer
+// can execute (see aap_lib.php's aapUploadExecutionAttachments comment) so
+// the requester/approver/anyone else never even receives this list in the
+// page's data, let alone sees it rendered.
+$execution_attachments = [];
+if ($can_execute) {
+    $exec_att_res = $conn->query("SELECT a.*, s.nama_staff AS uploaded_by_name
+                              FROM aap_case_execution_attachments a
+                              LEFT JOIN staff s ON s.id = a.uploaded_by
+                              WHERE a.case_id = " . (int)$id . "
+                              ORDER BY a.timestamp ASC");
+    while ($exec_att_res && $row = $exec_att_res->fetch_assoc()) $execution_attachments[] = $row;
+}
+
+$case_notes = aapFetchCaseNotes($conn, $id);
+$reference_links = aapFetchCaseReferenceLinks($conn, $id);
+
+// Only needed to populate the Case Summary edit form's Case Type select -
+// scoped to the case's own department (same rule as aap_add.php's Case Type
+// picker, which only ever offers Case Types belonging to the originating
+// Fixit report's department) so switching Case Type can't accidentally move
+// a case into a different department's approval workflow.
+$edit_case_types = $can_edit_case ? aapFetchCaseTypes($conn, false, (int)$case['case_type_department_id']) : [];
+
+$audit_logs = aapFetchAuditLogs($conn, $id);
+
+// Single unified display status (see aapCaseDisplayStatus in aap_lib.php)
+// instead of raw case_status, for this page's OKR-style status chip.
+$case_display_status = aapCaseDisplayStatus($case);
+$case_pill = 'aap-pill-' . $case_display_status['slug'];
+$approval_status_display = aapApprovalStatusDisplay($case['approval_status']);
+$approval_pill = 'aap-pill-' . $approval_status_display['slug'];
+?>
+
+<?php include('aap_modern_head.php'); ?>
+
+<div class="header">
+  <b class="rtop"><b class="r1"></b><b class="r2"></b><b class="r3"></b><b class="r4"></b></b>
+  <h1 class="headerH1"><img src="img/logo.svg"> Case <?php echo htmlspecialchars($case['case_ref']); ?></h1>
+  <b class="rbottom"><b class="r4"></b><b class="r3"></b><b class="r2"></b><b class="r1"></b></b>
+</div>
+
+<?php include('aap_sidebar.php'); ?>
+
+<div class="aap-modern">
+
+    <div class="aap-page-title-row">
+        <h2 class="aap-page-title">
+            <i class="bi bi-folder2-open"></i> Case <?php echo htmlspecialchars($case['case_ref']); ?>
+            <span class="aap-pill <?php echo $case_pill; ?>"><?php echo htmlspecialchars($case_display_status['label']); ?></span>
+        </h2>
+        <div class="aap-page-actions">
+            <a href="index.php" class="alpro-btn alpro-btn-grey" style="text-decoration:none;"><i class="bi bi-arrow-left"></i> Back to Case Queue</a>
+        </div>
+    </div>
+
+    <div class="aap-card" style="margin-bottom: 1rem; padding: 0.75rem 1.25rem;">
+        <div class="aap-stepper">
+            <?php foreach ($aap_steps as $step): ?>
+                <div class="aap-step <?php echo $step['state']; ?>">
+                    <div class="aap-step-circle">
+                        <?php if ($step['state'] === 'done'): ?>
+                            <i class="bi bi-check-lg"></i>
+                        <?php elseif ($step['state'] === 'failed'): ?>
+                            <i class="bi bi-x-lg"></i>
+                        <?php elseif ($step['state'] === 'current'): ?>
+                            <i class="bi bi-record-fill" style="font-size:10px;"></i>
+                        <?php else: ?>
+                            &nbsp;
+                        <?php endif; ?>
+                    </div>
+                    <div class="aap-step-label"><?php echo htmlspecialchars($step['label']); ?></div>
+                    <?php if (!empty($step['sub'])): ?>
+                        <div class="aap-step-sub"><?php echo htmlspecialchars($step['sub']); ?></div>
+                    <?php endif; ?>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    </div>
+
+    <?php if (isset($_GET['created'])): ?>
+        <div class="alpro-alert alpro-success"><i class="bi bi-check-circle"></i> Case raised successfully as <?php echo htmlspecialchars($case['case_ref']); ?>.</div>
+    <?php endif; ?>
+    <?php if (!empty($msg)): ?>
+        <div class="alpro-alert <?php echo $msg_type; ?>"><?php echo htmlspecialchars($msg); ?></div>
+    <?php endif; ?>
+    <?php if ((int)$case['suspend_count'] > 0): ?>
+        <div class="alpro-alert" style="background:#fdf3e0; color:#7a5a10; border-color:#f3dfa8;">
+            <i class="bi bi-pause-circle"></i> This case was suspended on <?php echo date('d-m-Y H:i', strtotime($case['suspended_at'])); ?> — see the Execution section below for who suspended it and why.
+        </div>
+    <?php endif; ?>
+
+    <div class="aap-bento">
+
+        <?php if (!empty($case['fixit_record_id'])): ?>
+        <div class="aap-bento-item aap-span-8">
+            <div class="aap-card aap-fixit-card" style="height:100%;">
+                <div class="aap-card-title-row">
+                    <h6 class="aap-card-title"><i class="bi bi-life-preserver"></i> Original Fixit Report — F<?php echo (int)$case['fixit_record_id']; ?></h6>
+                    <a href="<?php echo htmlspecialchars(aapFixitTicketUrl($case['fixit_record_id'])); ?>" target="_blank" style="font-size:12px;">View in Fixit <i class="bi bi-box-arrow-up-right"></i></a>
+                </div>
+                <?php if ($fixit_record): ?>
+                    <div class="aap-fact-row">
+                        <div class="alpro-field"><label>Category</label><div><?php echo htmlspecialchars($fixit_record['category_name'] ?: '—'); ?></div></div>
+                        <div class="alpro-field"><label>Department</label><div><?php echo htmlspecialchars($fixit_record['department_name'] ?: '—'); ?></div></div>
+                        <div class="alpro-field"><label>Outlet</label><div><?php echo htmlspecialchars($fixit_record['outlet_code'] ?: '—'); ?></div></div>
+                        <div class="alpro-field"><label>Lodged By</label><div><?php echo htmlspecialchars($fixit_record['lodged_by_name'] ?: '—'); ?> on <?php echo $fixit_record['lodge'] ? date('d-m-Y H:i', strtotime($fixit_record['lodge'])) : '—'; ?></div></div>
+                    </div>
+                    <div class="alpro-field aap-fact-block"><label>Report</label><div><?php echo nl2br(htmlspecialchars($fixit_record['report'])); ?></div></div>
+                    <?php if (!empty($fixit_record['remark'])): ?>
+                    <div class="alpro-field aap-fact-block">
+                        <label>Report Description</label>
+                        <div style="height:150px; max-height:400px; overflow-y:auto; resize:vertical; border:1px solid #e5e9ec; border-radius:6px; padding:8px 10px; background:#fff;"><?php echo nl2br(htmlspecialchars($fixit_record['remark'])); ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <!-- No separate attachment list here - every Fixit attachment is
+                    now always copied into this case's own Evidence Attachments
+                    card as real case evidence (aapAttachExistingFileAsEvidence(),
+                    both from aapCreateCaseFromFixitRequiredInfo()'s auto-raise and
+                    aap_add.php's manual raise_case), so listing them again from
+                    the Fixit side here would just be a duplicate. -->
+                <?php else: ?>
+                    <div class="aap-card-hint" style="margin:0;">Ticket details could not be loaded.</div>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <div class="aap-bento-item aap-span-8">
+            <div class="aap-card">
+                <div class="aap-card-title-row">
+                    <h6 class="aap-card-title"><i class="bi bi-file-earmark-text"></i> Case Summary</h6>
+                    <?php if ($can_edit_case): ?>
+                        <button type="button" id="case-edit-toggle" class="alpro-btn alpro-btn-grey" style="padding:4px 12px; font-size:12px;"><i class="bi bi-pencil"></i> Edit</button>
+                    <?php endif; ?>
+                </div>
+
+                <div id="case-view">
+                    <div class="aap-form-grid">
+                        <div class="alpro-field"><label>Department</label><div><?php echo htmlspecialchars($case['requester_department_name'] ?: '—'); ?></div></div>
+                        <div class="alpro-field aap-span-2"><label>Case Type</label><div><?php echo htmlspecialchars($case['case_type_name']); ?></div></div>
+                    </div>
+
+                    <?php if (empty($ordered_points)): ?>
+                    <!-- No per-Case-Type "Instruction for User" list - Form
+                    Master's own fixed fields, today's original layout. -->
+                    <div class="aap-form-grid">
+                        <div class="alpro-field"><label><?php echo htmlspecialchars($form_master_config['customer_name']['label']); ?></label><div><?php echo htmlspecialchars($case['customer_name'] ?: '—'); ?></div></div>
+                        <div class="alpro-field aap-span-2"><label><?php echo htmlspecialchars($field_cfg['transaction_ref']['label']); ?></label><div><?php echo htmlspecialchars($case['transaction_ref'] ?: '—'); ?></div></div>
+                    </div>
+
+                    <div class="aap-form-grid">
+                        <div class="alpro-field"><label><?php echo htmlspecialchars($field_cfg['calculated_value']['label']); ?></label><div><?php echo aapFormatValue($case['calculated_value'], $case['value_type']); ?></div></div>
+                        <div class="alpro-field aap-span-2"><label>Raised By</label><div><?php echo htmlspecialchars($case['requester_name'] ?: '—'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['timestamp'])); ?></div></div>
+                    </div>
+
+                    <div class="aap-form-grid">
+                        <div class="alpro-field aap-span-3">
+                            <label><?php echo htmlspecialchars($field_cfg['recommended_outcome']['label']); ?></label>
+                            <div style="height:80px; max-height:400px; overflow-y:auto; resize:vertical; border:1px solid #e5e9ec; border-radius:6px; padding:8px 10px; background:#fff;"><?php echo nl2br(htmlspecialchars($case['recommended_outcome'] ?: '—')); ?></div>
+                        </div>
+                    </div>
+                    <?php else: ?>
+                    <!-- This Case Type's own "Instruction for User" list
+                    REPLACES the fixed fields above entirely - only listed
+                    fields show, in the list's own order (see
+                    aapCaseTypeFieldOrder() in aap_lib.php). -->
+                    <div class="aap-form-grid">
+                        <div class="alpro-field aap-span-3"><label>Raised By</label><div><?php echo htmlspecialchars($case['requester_name'] ?: '—'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['timestamp'])); ?></div></div>
+                    </div>
+                    <?php foreach ($ordered_points as $op):
+                        $op_key = $op['matched_field_key'];
+                        if ($op_key === 'staff_name') $op_key = 'customer_name';
+                        if ($op_key === 'customer_name') { $op_value = $case['customer_name'] ?: '—'; }
+                        elseif ($op_key === 'customer_membership_id') { $op_value = $case['customer_membership_id'] ?: '—'; }
+                        elseif ($op_key === 'transaction_ref') { $op_value = $case['transaction_ref'] ?: '—'; }
+                        elseif ($op_key === 'calculated_value') { $op_value = aapFormatValue($case['calculated_value'], $case['value_type']); }
+                        elseif ($op_key === 'value_type') { $op_value = $case['value_type'] === 'points' ? 'Points' : 'Cash (RM)'; }
+                        elseif ($op_key === 'recommended_outcome') { $op_value = $case['recommended_outcome'] ?: '—'; }
+                        elseif ($op_key === 'bank_name') { $op_value = $case['bank_name'] ?: '—'; }
+                        elseif ($op_key === 'bank_account_number') { $op_value = $case['bank_account_number'] ?: '—'; }
+                        elseif ($op_key === 'bank_account_holder') { $op_value = $case['bank_account_holder'] ?: '—'; }
+                        else { $op_value = $instruction_answers_by_key[$op['key']] ?? '—'; } ?>
+                        <div class="aap-form-grid">
+                            <div class="alpro-field aap-span-3">
+                                <label><?php echo htmlspecialchars($op['label']); ?></label>
+                                <div><?php echo htmlspecialchars($op_value); ?></div>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                    <?php endif; ?>
+
+                    <?php if (!empty($display_custom_fields)): ?>
+                    <!-- Additional Fields (admin/aap_settings.php's Form
+                    Master section) - admin-defined custom fields, shown
+                    inline within Case Summary rather than their own card. A
+                    retired field this case already answered still shows
+                    read-only here (see aapFetchCaseCustomFieldsForDisplay()
+                    in aap_lib.php). -->
+                    <div class="aap-form-grid">
+                        <?php foreach ($display_custom_fields as $dcf): ?>
+                            <div class="alpro-field">
+                                <label><?php echo htmlspecialchars($dcf['label']); ?></label>
+                                <div><?php echo $dcf['field_type'] === 'textarea' ? nl2br(htmlspecialchars($dcf['value'] ?: '—')) : htmlspecialchars($dcf['value'] !== null && $dcf['value'] !== '' ? $dcf['value'] : '—'); ?></div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php endif; ?>
+                </div>
+
+                <?php if ($can_edit_case): ?>
+                <form id="case-edit" method="post" action="" enctype="multipart/form-data" style="display:none;">
+                    <input type="hidden" name="action" id="case-edit-action-field" value="edit_case">
+
+                    <div class="aap-form-grid">
+                        <div class="alpro-field">
+                            <label>Department <span class="aap-info-icon">i<span class="aap-tooltip">Fixed to this case's own department - pick the Case Type from that department's list.</span></span></label>
+                            <div class="alpro-input" style="background:#f1f3f5; display:flex; align-items:center; height:38px;"><?php echo htmlspecialchars($case['case_type_department_name'] ?: '—'); ?></div>
+                        </div>
+
+                        <div class="alpro-field aap-span-2">
+                            <label>Case Type <span class="aap-req">*</span></label>
+                            <select class="alpro-input" name="case_type_id" id="edit_case_type_id" required style="height:38px;">
+                                <?php foreach ($edit_case_types as $ect): ?>
+                                    <option value="<?php echo $ect['id']; ?>" <?php echo ($case['case_type_id'] == $ect['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ect['case_type_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Not shown - Membership ID adds no value on screen (it's
+                    either a customer.c_id or, for a Staff case, a staff.id - see
+                    aap_add.php's Customer/Staff toggle). Kept in the DOM, hidden,
+                    purely so Save Changes keeps round-tripping the stored value
+                    via aapSaveCaseEditFields() instead of blanking it out,
+                    regardless of whether a per-Case-Type list is active. -->
+                    <input type="hidden" name="customer_membership_id" id="edit-customer-membership-input" value="<?php echo htmlspecialchars($case['customer_membership_id'] ?? ''); ?>">
+
+                    <?php if (empty($ordered_points)): ?>
+                    <!-- No per-Case-Type "Instruction for User" list - Form
+                    Master's own fixed fields, today's original layout. -->
+                    <div class="aap-form-grid">
+                        <div class="alpro-field">
+                            <label><?php echo htmlspecialchars($form_master_config['customer_name']['label']); ?></label>
+                            <input class="alpro-input" type="text" name="customer_name" value="<?php echo htmlspecialchars($case['customer_name'] ?? ''); ?>" readonly>
+                        </div>
+                        <div class="alpro-field aap-span-2" <?php echo $field_cfg['transaction_ref']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['transaction_ref']['label']); ?> <?php if ($field_cfg['transaction_ref']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <input class="alpro-input" type="text" name="transaction_ref" id="edit-transaction-ref-input" value="<?php echo htmlspecialchars($case['transaction_ref'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*" <?php echo $field_cfg['transaction_ref']['required'] ? 'required' : ''; ?>>
+                        </div>
+                    </div>
+
+                    <div class="aap-form-grid">
+                        <div class="alpro-field" <?php echo $field_cfg['calculated_value']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['calculated_value']['label']); ?> <?php if ($field_cfg['calculated_value']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <input class="alpro-input" type="number" step="0.01" min="0" name="calculated_value" value="<?php echo htmlspecialchars($case['calculated_value']); ?>" <?php echo $field_cfg['calculated_value']['required'] ? 'required' : ''; ?>>
+                        </div>
+                        <div class="alpro-field aap-span-2" <?php echo $field_cfg['value_type']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['value_type']['label']); ?> <?php if ($field_cfg['value_type']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <select class="alpro-input" name="value_type" <?php echo $field_cfg['value_type']['required'] ? 'required' : ''; ?>>
+                                <option value="cash" <?php echo $case['value_type'] === 'cash' ? 'selected' : ''; ?>>Cash (RM)</option>
+                                <option value="points" <?php echo $case['value_type'] === 'points' ? 'selected' : ''; ?>>Points</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="aap-form-grid">
+                        <div class="alpro-field aap-span-3" <?php echo $field_cfg['recommended_outcome']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['recommended_outcome']['label']); ?> <?php if ($field_cfg['recommended_outcome']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <input class="alpro-input" type="text" name="recommended_outcome" value="<?php echo htmlspecialchars($case['recommended_outcome'] ?? ''); ?>" <?php echo $field_cfg['recommended_outcome']['required'] ? 'required' : ''; ?>>
+                        </div>
+                    </div>
+                    <?php else: ?>
+                    <!-- This Case Type's own "Instruction for User" list
+                    REPLACES the fixed fields above entirely, in order (see
+                    aapCaseTypeFieldOrder() in aap_lib.php). Bank Detail's
+                    Account Number/Holder render here too when matched,
+                    instead of in the Bank Detail card below (see
+                    $bank_fields_matched_here). -->
+                    <?php foreach ($ordered_points as $op):
+                        $op_key = $op['matched_field_key'];
+                        if ($op_key === 'staff_name') $op_key = 'customer_name';
+                        // A matched point is always required (it's a real
+                        // Form Master field under REPLACE semantics) -
+                        // only an unmatched/extra point's own Required
+                        // toggle (admin/aap_admin.php's builder) matters.
+                        $op_required = ($op_key !== null) || ($op['required'] ?? true); ?>
+                        <div class="aap-form-grid">
+                            <div class="alpro-field aap-span-3">
+                                <label><?php echo htmlspecialchars($op['label']); ?> <?php if ($op_required): ?><span class="aap-req">*</span><?php endif; ?></label>
+                                <?php if ($op_key === 'customer_name'): ?>
+                                    <input class="alpro-input" type="text" name="customer_name" value="<?php echo htmlspecialchars($case['customer_name'] ?? ''); ?>" readonly>
+                                <?php elseif ($op_key === 'customer_membership_id'): ?>
+                                    <input class="alpro-input" type="text" value="<?php echo htmlspecialchars($case['customer_membership_id'] ?? ''); ?>" readonly>
+                                <?php elseif ($op_key === 'transaction_ref'): ?>
+                                    <input class="alpro-input" type="text" name="transaction_ref" value="<?php echo htmlspecialchars($case['transaction_ref'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*" required>
+                                <?php elseif ($op_key === 'calculated_value'): ?>
+                                    <input class="alpro-input" type="number" step="0.01" min="0" name="calculated_value" value="<?php echo htmlspecialchars($case['calculated_value']); ?>" required>
+                                <?php elseif ($op_key === 'value_type'): ?>
+                                    <select class="alpro-input" name="value_type" required>
+                                        <option value="cash" <?php echo $case['value_type'] === 'cash' ? 'selected' : ''; ?>>Cash (RM)</option>
+                                        <option value="points" <?php echo $case['value_type'] === 'points' ? 'selected' : ''; ?>>Points</option>
+                                    </select>
+                                <?php elseif ($op_key === 'recommended_outcome'): ?>
+                                    <input class="alpro-input" type="text" name="recommended_outcome" value="<?php echo htmlspecialchars($case['recommended_outcome'] ?? ''); ?>" required>
+                                <?php elseif ($op_key === 'bank_name'): ?>
+                                    <select class="alpro-input" name="bank_id" required>
+                                        <option value="">Select Bank</option>
+                                        <?php foreach (aapFetchBankMasterOptions($conn) as $bank): ?>
+                                            <option value="<?php echo $bank['id']; ?>" <?php echo ((int)($case['bank_id'] ?? 0) === (int)$bank['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($bank['bank_name']); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                <?php elseif ($op_key === 'bank_account_number'): ?>
+                                    <input class="alpro-input" type="text" name="bank_account_number" value="<?php echo htmlspecialchars($case['bank_account_number'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*" required>
+                                <?php elseif ($op_key === 'bank_account_holder'): ?>
+                                    <input class="alpro-input" type="text" name="bank_account_holder" value="<?php echo htmlspecialchars($case['bank_account_holder'] ?? ''); ?>" required>
+                                <?php elseif ($op['type'] === 'number'): ?>
+                                    <input class="alpro-input" type="number" step="any" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" value="<?php echo htmlspecialchars($instruction_answers_by_key[$op['key']] ?? ''); ?>" <?php echo $op_required ? 'required' : ''; ?>>
+                                <?php elseif ($op['type'] === 'dropdown' && !empty($op['options'])): ?>
+                                    <select class="alpro-input" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" <?php echo $op_required ? 'required' : ''; ?>>
+                                        <option value="">Select</option>
+                                        <?php $op_current_answer = $instruction_answers_by_key[$op['key']] ?? ''; foreach ($op['options'] as $opt): ?>
+                                            <option value="<?php echo htmlspecialchars($opt); ?>" <?php echo $op_current_answer === $opt ? 'selected' : ''; ?>><?php echo htmlspecialchars($opt); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                <?php else: ?>
+                                    <input class="alpro-input" type="text" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" value="<?php echo htmlspecialchars($instruction_answers_by_key[$op['key']] ?? ''); ?>" <?php echo $op_required ? 'required' : ''; ?>>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                    <?php endif; ?>
+
+                    <?php if (!empty($active_custom_fields)): ?>
+                    <div class="aap-form-grid">
+                        <?php foreach ($active_custom_fields as $cf):
+                            $cf_current = '';
+                            foreach ($display_custom_fields as $dcf) { if ((int)$dcf['id'] === (int)$cf['id']) { $cf_current = $dcf['value'] ?? ''; break; } } ?>
+                            <div class="alpro-field">
+                                <label><?php echo htmlspecialchars($cf['label']); ?> <?php if ($cf['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                                <?php if ($cf['field_type'] === 'number'): ?>
+                                    <input class="alpro-input" type="number" step="any" name="custom_field[<?php echo (int)$cf['id']; ?>]" value="<?php echo htmlspecialchars($cf_current); ?>" <?php echo $cf['required'] ? 'required' : ''; ?>>
+                                <?php elseif ($cf['field_type'] === 'dropdown'): ?>
+                                    <select class="alpro-input" name="custom_field[<?php echo (int)$cf['id']; ?>]" <?php echo $cf['required'] ? 'required' : ''; ?>>
+                                        <option value="">Select</option>
+                                        <?php foreach ($cf['options'] as $opt): ?>
+                                            <option value="<?php echo htmlspecialchars($opt); ?>" <?php echo $cf_current === $opt ? 'selected' : ''; ?>><?php echo htmlspecialchars($opt); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                <?php else: ?>
+                                    <textarea class="alpro-input" name="custom_field[<?php echo (int)$cf['id']; ?>]" <?php echo $cf['required'] ? 'required' : ''; ?> style="height:38px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($cf_current); ?></textarea>
+                                <?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php endif; ?>
+
+                </form>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <div class="aap-bento-item aap-span-4"<?php echo !empty($case['fixit_record_id']) ? ' style="grid-row: 1 / span 2; grid-column: 9 / span 4; align-self:start;"' : ''; ?>>
+            <div class="aap-card">
+                <h6 class="aap-card-title"><i class="bi bi-shield-check"></i> Approval gate</h6>
+                <p style="margin: 0 0 4px; line-height:2;">
+                    Value: <span class="aap-pill" style="background:#e7f1ff; color:#0d6efd;"><?php echo aapFormatValue($case['calculated_value'], $case['value_type']); ?></span>
+                    <span class="aap-info-icon">i<span class="aap-tooltip">Approvable only by staff on this Case Type's Approval Staff Tier list, with a tier covering this value.</span></span>
+                    <span style="margin-left:24px;">Status:</span> <span class="aap-pill <?php echo $approval_pill; ?>"><?php echo htmlspecialchars($approval_status_display['label']); ?></span>
+                </p>
+                <?php if ($case['approver_name']): ?>
+                    <?php $value_was_adjusted = $case['approved_value'] !== null && abs((float)$case['approved_value'] - (float)$case['calculated_value']) > 0.001; ?>
+                    <p class="aap-meta-line">
+                        <?php echo htmlspecialchars($approval_status_display['label']); ?> by <?php echo htmlspecialchars($case['approver_name']); ?> on <?php echo date('d-m-Y H:i', strtotime($case['approved_at'])); ?>
+                        <?php if ($case['approved_value'] !== null): ?>
+                            — Approved value:
+                            <?php if ($value_was_adjusted): ?>
+                                <span class="aap-pill" style="background:#fff3cd; color:#856404;"><?php echo aapFormatValue($case['approved_value'], $case['value_type']); ?></span>
+                                <span style="color:#6c757d;">(adjusted from <?php echo aapFormatValue($case['calculated_value'], $case['value_type']); ?>)</span>
+                            <?php else: ?>
+                                <?php echo aapFormatValue($case['approved_value'], $case['value_type']); ?>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                        <?php if ($case['approval_remark']): ?><br>Remark: <?php echo htmlspecialchars($case['approval_remark']); ?><?php endif; ?>
+                    </p>
+                <?php endif; ?>
+
+                <?php // Shown here only when THIS card's own Suspend Case
+                // triggered the most recent suspend (suspended_stage='approval')
+                // - Execution's own suspend shows the same meta line under its
+                // own card instead, see below. ?>
+                <?php if ($case['suspended_at'] && $case['suspended_stage'] === 'approval'): ?>
+                    <p class="aap-meta-line" style="color:#b8860b;">Suspended by <?php echo htmlspecialchars($case['suspended_by_name'] ?: 'Unknown'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['suspended_at'])); ?><br>Reason: <?php echo htmlspecialchars($case['suspend_reason'] ?? ''); ?></p>
+                <?php endif; ?>
+
+                <?php
+                $physical_ok = in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
+                if ($case['case_status'] === 'draft'):
+                ?>
+                    <div class="alpro-alert alpro-warn" style="margin-top:18px;"><i class="bi bi-hourglass-split"></i> Draft — gathering evidence. Open the case below when ready to start the approval workflow.</div>
+                    <?php if ($can_open_case): ?>
+                        <button class="alpro-btn alpro-btn-blue alpro-mt-10" type="submit" form="case-edit" id="open-case-btn" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-unlock"></i> Open Case</button>
+                    <?php endif; ?>
+                <?php elseif ($case['case_status'] !== 'open'): ?>
+                    <!-- Terminal (voided/rejected/executed/closed) - approval_status
+                    can still read 'pending' here (Void/Reject Case never touches it,
+                    see aapCaseDisplayStatus()'s own voided/rejected handling in
+                    aap_lib.php), so this must come before any approval_status-based
+                    branch below, not just the literal 'draft' check - otherwise a
+                    voided case could still show (and act on) the approval gate. -->
+                <?php elseif ($case['approval_status'] === 'pending' && !$physical_ok): ?>
+                    <div class="alpro-alert alpro-warn" style="margin-top:18px;"><i class="bi bi-exclamation-triangle"></i> Blocked — this case cannot be decided until the physical return is confirmed.</div>
+                <?php elseif ($case['approval_status'] === 'pending' && empty($case['submitted_for_approval'])): ?>
+                    <div class="alpro-alert alpro-warn" style="margin-top:18px;"><i class="bi bi-pause-circle"></i> Active — ready, but not yet submitted for approval.</div>
+                    <?php if ($can_submit_for_approval): ?>
+                        <form method="post" action="" class="alpro-mt-10">
+                            <input type="hidden" name="action" value="submit_for_approval">
+                            <button class="alpro-btn alpro-btn-blue" type="submit" onclick="return confirm('Submit this case for approval? Approvers will be notified.');" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-send"></i> Submit for Approval</button>
+                        </form>
+                    <?php endif; ?>
+                <?php elseif ($case['approval_status'] === 'pending' && $can_act_approval): ?>
+                    <form method="post" action="" class="alpro-mt-10" id="approval-gate-form" data-original-value="<?php echo htmlspecialchars($case['calculated_value']); ?>">
+                        <div class="alpro-grid">
+                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Approved Value <span class="aap-muted" style="font-weight:normal; font-size:11px; text-transform:uppercase;">(adjust if needed)</span></label><input class="alpro-input" type="number" step="0.01" min="0" name="approved_value" id="approved-value-input" value="<?php echo htmlspecialchars($case['calculated_value']); ?>"></div>
+                            <div class="alpro-field" style="grid-column: 1 / -1;">
+                                <label>Report Description <span class="aap-req" id="approval-remark-req" style="display:none;">*</span> <span class="aap-muted" id="approval-remark-hint" style="font-weight:normal; font-size:11px; text-transform:none;"></span></label>
+                                <textarea class="alpro-input" name="approval_remark" id="approval-remark-input" placeholder="Reason / notes" style="height:60px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['approval_remark'] ?? ''); ?></textarea>
+                                <div id="approval-remark-error" style="display:none; color:#dc3545; font-size:12px; margin-top:4px;"></div>
+                                <div style="text-align:right;"><span id="approval-remark-status" style="font-size:11px; color:#6c757d;"></span></div>
+                            </div>
+                        </div>
+                        <hr style="border:none; border-top:1px solid #e5e9ec; margin:10px 0;">
+                        <div class="alpro-actions aap-actions-row">
+                            <button class="alpro-btn aap-btn-action aap-btn-action-primary" type="submit" name="action" value="approve" title="Approve" onclick="return aapApprovalGateSubmit(this, 'approve');"><i class="bi bi-check-lg"></i> Approve</button>
+                            <button class="alpro-btn aap-btn-action aap-btn-action-danger" type="submit" name="action" value="reject" onclick="return aapApprovalGateSubmit(this, 'reject');"><i class="bi bi-x-lg"></i> Reject</button>
+                            <button type="button" id="approval-suspend-toggle" class="alpro-btn aap-btn-action aap-btn-action-danger"><i class="bi bi-pause-circle"></i> Suspend Case</button>
+                        </div>
+                    </form>
+
+                    <form method="post" action="" id="approval-suspend-form" style="display:none;" class="alpro-mt-10" onsubmit="return confirm('Suspend this case and send it back for more evidence? Evidence already on the case stays locked forever, even once it is your turn to edit again. This cannot be undone.');">
+                        <input type="hidden" name="action" value="suspend_case_approval">
+                        <div class="alpro-field">
+                            <label>Suspend Reason <span class="aap-req">*</span></label>
+                            <textarea class="alpro-input" name="suspend_reason" required style="height:60px;" placeholder="e.g. not enough evidence submitted"></textarea>
+                        </div>
+                        <div class="alpro-actions aap-actions-row alpro-mt-10">
+                            <button class="alpro-btn aap-btn-action aap-btn-action-danger-solid" type="submit">Confirm Suspend</button>
+                            <button class="alpro-btn aap-btn-action aap-btn-action-neutral" type="button" id="approval-suspend-cancel">Cancel</button>
+                        </div>
+                    </form>
+                <?php elseif ($case['approval_status'] === 'pending'): ?>
+                    <p class="aap-card-hint" style="margin-top:12px;">Awaiting decision by this Case Type's assigned Approval staff.</p>
+                <?php endif; ?>
+            </div>
+
+            <?php if ((int)$case['physical_confirm_required'] === 1): ?>
+            <div class="aap-card" style="margin-top:15px;">
+                <h6 class="aap-card-title"><i class="bi bi-box-seam"></i> Verification Reference</h6>
+                <p style="margin: 0 0 4px;">Status: <strong><?php echo aapPhysicalStatusLabel($case['physical_confirm_status']); ?></strong></p>
+                <?php if ($case['physical_confirm_ref']): ?>
+                    <p class="aap-meta-line">Ref: <span class="alpro-mono"><?php echo htmlspecialchars($case['physical_confirm_ref']); ?></span></p>
+                <?php endif; ?>
+                <?php if ($case['physical_confirmed_by_name']): ?>
+                    <p class="aap-meta-line">Tagged &amp; confirmed by <?php echo htmlspecialchars($case['physical_confirmed_by_name']); ?> on <?php echo date('d-m-Y H:i', strtotime($case['physical_confirmed_at'])); ?></p>
+                <?php endif; ?>
+
+                <?php if ($case['case_status'] === 'draft'): ?>
+                    <p class="aap-card-hint" style="margin-top:12px;">Available once the case is opened.</p>
+                <?php elseif ($case['physical_confirm_status'] === 'pending' && $can_tag_physical): ?>
+                    <form method="post" action="" class="alpro-mt-10" id="tag-physical-form">
+                        <input type="hidden" name="action" value="tag_physical">
+                        <div class="alpro-grid">
+                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>RFID / Tag Reference <span class="aap-req">*</span></label><input class="alpro-input" type="text" name="physical_confirm_ref" value="<?php echo htmlspecialchars($case['physical_confirm_ref'] ?? ''); ?>" required autofocus style="min-height:0; height:auto; padding:5px 8px;"></div>
+                        </div>
+                        <hr style="border:none; border-top:1px solid #e5e9ec; margin:10px 0;">
+                        <button class="alpro-btn alpro-btn-blue" type="submit" onclick="return confirm('Confirm this item was tagged and received? This moves the case straight to the approval gate.');" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-check2-circle"></i> Confirm Verification</button>
+                    </form>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
+
+            <?php if ($can_void): ?>
+            <div class="aap-card" style="margin-top:15px;">
+                <h6 class="aap-card-title"><i class="bi bi-x-circle"></i> Reject Case</h6>
+                <p class="aap-card-hint" style="margin:0 0 10px;">
+                    Rejecting removes <?php echo htmlspecialchars($case['case_ref']); ?> (<?php echo htmlspecialchars($case['case_type_name']); ?>) from the active queue.
+                    This is only possible before the case reaches a decision at the approval gate — it cannot be undone.
+                </p>
+
+                <button type="button" id="void-case-toggle" class="alpro-btn" style="width:100%; padding:6px 10px; font-size:12px; background:#fff; color:#212529; border:1px solid #000;"><i class="bi bi-x-circle"></i> Reject Case</button>
+
+                <form method="post" action="" id="void-case-form" style="display:none;" onsubmit="return confirm('Reject this case? This cannot be undone.');">
+                    <input type="hidden" name="action" value="void_case">
+                    <div class="alpro-field">
+                        <label>Reason</label>
+                        <textarea class="alpro-input" name="void_reason" style="height:80px;" placeholder="Why is this case being rejected?"></textarea>
+                    </div>
+                    <div class="alpro-actions aap-actions-row alpro-mt-10">
+                        <button class="alpro-btn aap-btn-action aap-btn-action-danger-solid" type="submit">Confirm Reject</button>
+                        <button class="alpro-btn aap-btn-action aap-btn-action-neutral" type="button" id="void-case-cancel">Cancel</button>
+                    </div>
+                </form>
+            </div>
+            <?php endif; ?>
+
+            <?php // Stays visible across a Suspend cycle (not just while
+            // approval_status is currently approved/corrected) so the past
+            // execution history below (ref/executor/when) doesn't disappear
+            // the moment the case goes back to Verification/Approval - only
+            // the actual Execute/Suspend buttons inside are gated on the
+            // live eligibility window, further down. ?>
+            <?php if (in_array($case['approval_status'], ['approved', 'corrected'], true) || $case['executor_name'] || (int)$case['suspend_count'] > 0): ?>
+            <div class="aap-card" style="margin-top:15px;">
+                <h6 class="aap-card-title"><i class="bi bi-gear"></i> Execution</h6>
+                <p style="margin: 0 0 4px;">Status: <strong><?php echo ucfirst($case['execution_status']); ?></strong></p>
+                <?php if ($case['executor_name']): ?>
+                    <p class="aap-meta-line">Executed by <?php echo htmlspecialchars($case['executor_name']); ?> on <?php echo date('d-m-Y H:i', strtotime($case['executed_at'])); ?></p>
+                <?php endif; ?>
+                <?php if ($case['execution_reference']): ?>
+                    <p class="aap-meta-line" style="white-space:pre-wrap;">Remarks: <?php echo htmlspecialchars($case['execution_reference']); ?></p>
+                <?php endif; ?>
+                <?php // Covers 'execution' and legacy NULL (suspended before
+                // suspended_stage existed) - a stage='approval' suspend shows
+                // its own copy under the Approval gate card above instead. ?>
+                <?php if ($case['suspended_at'] && $case['suspended_stage'] !== 'approval'): ?>
+                    <p class="aap-meta-line" style="color:#b8860b;">Suspended by <?php echo htmlspecialchars($case['suspended_by_name'] ?: 'Unknown'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['suspended_at'])); ?><br>Reason: <?php echo htmlspecialchars($case['suspend_reason'] ?? ''); ?></p>
+                <?php endif; ?>
+
+                <?php // Also requires approval_status approved/corrected right
+                // now, not just execution_status pending - after a Suspend
+                // resets both back to pending together, execution isn't
+                // actually reachable again until the case is re-approved,
+                // even though the outer card above stays visible for
+                // history the whole time. ?>
+                <?php if ($case['execution_status'] === 'pending' && in_array($case['approval_status'], ['approved', 'corrected'], true) && $can_execute): ?>
+                    <form method="post" action="" id="execute-form" class="alpro-mt-10">
+                        <div class="alpro-grid">
+                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Execution Remarks <span class="aap-req">*</span></label><textarea class="alpro-input" name="execution_reference" required style="height:38px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['execution_reference'] ?? ''); ?></textarea></div>
+                        </div>
+                        <hr style="border:none; border-top:1px solid #e5e9ec; margin:10px 0;">
+                        <div class="alpro-actions aap-actions-row" id="execute-actions-default">
+                            <button type="button" id="execute-reveal-btn" class="alpro-btn aap-btn-action aap-btn-action-primary"><i class="bi bi-play-fill"></i> Execute</button>
+                            <button type="button" id="suspend-case-toggle" class="alpro-btn aap-btn-action aap-btn-action-danger"><i class="bi bi-pause-circle"></i> Suspend Case</button>
+                        </div>
+                        <div class="alpro-actions aap-actions-row" id="execute-actions-confirm" style="display:none; flex-wrap:nowrap;">
+                            <button type="submit" name="action" value="execute" class="alpro-btn aap-btn-action aap-btn-action-primary" onclick="return confirm('Execute this adjustment only? Closing the case is a separate step afterward.');" style="padding:6px 4px; font-size:11px;"><i class="bi bi-play-fill"></i> Execute in Progress</button>
+                            <button type="submit" name="action" value="execute_and_close" class="alpro-btn aap-btn-action aap-btn-action-primary" onclick="return confirm('Execute AND close this case now? This notifies the requester and completes the linked Fixit ticket immediately. This cannot be undone.');" style="padding:6px 4px; font-size:11px;"><i class="bi bi-check2-all"></i> Execute and Close</button>
+                            <button type="button" id="execute-cancel-btn" class="alpro-btn aap-btn-action aap-btn-action-neutral" style="padding:6px 4px; font-size:11px;">Cancel</button>
+                        </div>
+                    </form>
+
+                    <form method="post" action="" id="suspend-case-form" style="display:none;" class="alpro-mt-10" onsubmit="return confirm('Suspend this case and send it back to Verification/Approval? Evidence already on the case stays locked forever, even once it is your turn to edit again. This cannot be undone.');">
+                        <input type="hidden" name="action" value="suspend_case">
+                        <div class="alpro-field">
+                            <label>Suspend Reason <span class="aap-req">*</span></label>
+                            <textarea class="alpro-input" name="suspend_reason" required style="height:60px;" placeholder="e.g. not enough evidence submitted"></textarea>
+                        </div>
+                        <div class="alpro-actions aap-actions-row alpro-mt-10">
+                            <button class="alpro-btn aap-btn-action aap-btn-action-danger-solid" type="submit">Confirm Suspend</button>
+                            <button class="alpro-btn aap-btn-action aap-btn-action-neutral" type="button" id="suspend-case-cancel">Cancel</button>
+                        </div>
+                    </form>
+                <?php endif; ?>
+
+                <?php // Same eligibility as the Execute/Suspend buttons above -
+                // hidden while the case is back at Verification/Approval
+                // after a Suspend, not just whenever the outer card happens
+                // to still be showing history. ?>
+                <?php if ($can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true)): ?>
+                <div class="alpro-mt-10" style="border-top:1px solid #e5e9ec; padding-top:10px;">
+                    <label style="font-size:11px; font-weight:600; color:#6c757d; text-transform:uppercase; display:block; margin-bottom:6px;"><i class="bi bi-eye-slash"></i> Execution Attachments (visible to Execution only)</label>
+                    <?php if (!empty($execution_attachments)): ?>
+                        <ul class="aap-attach-list">
+                            <?php foreach ($execution_attachments as $eatt): ?>
+                                <li style="display:flex; align-items:center; gap:8px;">
+                                    <form method="post" action="" style="display:inline-flex; align-items:center; gap:4px; flex-shrink:0;">
+                                        <input type="hidden" name="action" value="toggle_execution_attachment_fixit">
+                                        <input type="hidden" name="attachment_id" value="<?php echo (int)$eatt['id']; ?>">
+                                        <label style="display:inline-flex; align-items:center; margin:0;" title="Show this file on the linked Fixit ticket once executed">
+                                            <input type="checkbox" name="show_in_fixit" value="1" onchange="this.form.submit();" <?php echo !empty($eatt['show_in_fixit']) ? 'checked' : ''; ?>>
+                                        </label>
+                                    </form>
+                                    <a href="?id=<?php echo $id; ?>&download_exec=<?php echo $eatt['id']; ?>" style="flex:1;"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($eatt['file_name']); ?></a>
+                                    <span style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                                        <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($eatt['uploaded_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($eatt['timestamp'])); ?></span>
+                                        <form method="post" action="" style="display:inline;" onsubmit="return aapConfirmDeleteAttachment();">
+                                            <input type="hidden" name="action" value="delete_execution_attachment">
+                                            <input type="hidden" name="attachment_id" value="<?php echo (int)$eatt['id']; ?>">
+                                            <button type="submit" title="Remove attachment" style="background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-trash"></i></button>
+                                        </form>
+                                    </span>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                    <?php else: ?>
+                        <p class="aap-card-hint" style="margin:0 0 8px;">No execution-only files uploaded yet.</p>
+                    <?php endif; ?>
+                    <form method="post" action="" enctype="multipart/form-data" style="display:flex; gap:8px; align-items:center;">
+                        <input type="hidden" name="action" value="add_execution_attachment">
+                        <input class="alpro-input" type="file" name="execution_evidence[]" multiple style="flex:1;">
+                        <button class="alpro-btn alpro-btn-grey" type="submit" style="padding:6px 12px; font-size:12px; flex-shrink:0;"><i class="bi bi-paperclip"></i> Add</button>
+                    </form>
+                </div>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
+
+            <?php if ($case['case_status'] === 'executed' && $can_close): ?>
+            <div class="aap-card" style="margin-top:15px;">
+                <h6 class="aap-card-title"><i class="bi bi-bell"></i> Notification &amp; Close</h6>
+                <form method="post" action="" class="alpro-mt-10">
+                    <input type="hidden" name="action" value="close">
+                    <button class="alpro-btn alpro-btn-blue" type="submit" onclick="return confirm('Close this case and notify the requester? This cannot be undone.');" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-check2-all"></i> Notify Requester &amp; Close Case</button>
+                </form>
+            </div>
+            <?php endif; ?>
+        </div>
+
+        <!-- Bank Detail - toggled together with Case Summary's own Edit/Save
+        Changes (same $can_edit_case window, same case-edit form via
+        form="case-edit" on each input below) rather than having its own
+        separate Edit button, so there's one unified edit session for the
+        case instead of two overlapping ones. -->
+        <?php if ($show_bank_detail_card): ?>
+        <div class="aap-bento-item aap-span-12">
+            <div class="aap-card">
+                <h6 class="aap-card-title"><i class="bi bi-bank"></i> Bank Detail</h6>
+
+                <?php // Bank Name/Account Number/Holder render here UNLESS the
+                // Instruction for User list moved them into Case Summary's
+                // ordered list instead (see $bank_fields_matched_in_order
+                // above) - never shown twice. ?>
+                <div id="bank-view">
+                    <div class="alpro-grid">
+                        <?php if (!isset($bank_fields_matched_in_order['bank_name'])): ?>
+                        <div class="alpro-field"><label><?php echo htmlspecialchars($field_cfg['bank_name']['label']); ?></label><div><?php echo htmlspecialchars($case['bank_name'] ?: '—'); ?></div></div>
+                        <?php endif; ?>
+                        <?php if (!isset($bank_fields_matched_in_order['bank_account_number'])): ?>
+                        <div class="alpro-field"><label><?php echo htmlspecialchars($field_cfg['bank_account_number']['label']); ?></label><div><?php echo htmlspecialchars($case['bank_account_number'] ?: '—'); ?></div></div>
+                        <?php endif; ?>
+                        <?php if (!isset($bank_fields_matched_in_order['bank_account_holder'])): ?>
+                        <div class="alpro-field"><label><?php echo htmlspecialchars($field_cfg['bank_account_holder']['label']); ?></label><div><?php echo htmlspecialchars($case['bank_account_holder'] ?: '—'); ?></div></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <?php if ($can_edit_case): ?>
+                <div id="bank-edit" style="display:none;">
+                    <div class="alpro-grid">
+                        <?php if (!isset($bank_fields_matched_in_order['bank_name'])): ?>
+                        <div class="alpro-field" <?php echo $field_cfg['bank_name']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['bank_name']['label']); ?> <?php if ($field_cfg['bank_name']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <select class="alpro-input" name="bank_id" form="case-edit" <?php echo $field_cfg['bank_name']['required'] ? 'required' : ''; ?>>
+                                <option value="">Select Bank</option>
+                                <?php foreach (aapFetchBankMasterOptions($conn) as $bank): ?>
+                                    <option value="<?php echo $bank['id']; ?>" <?php echo ((int)($case['bank_id'] ?? 0) === (int)$bank['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($bank['bank_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <?php endif; ?>
+                        <?php if (!isset($bank_fields_matched_in_order['bank_account_number'])): ?>
+                        <div class="alpro-field" <?php echo $field_cfg['bank_account_number']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['bank_account_number']['label']); ?> <?php if ($field_cfg['bank_account_number']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <input class="alpro-input" type="text" name="bank_account_number" id="edit-bank-account-number-input" form="case-edit" value="<?php echo htmlspecialchars($case['bank_account_number'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*" <?php echo $field_cfg['bank_account_number']['required'] ? 'required' : ''; ?>>
+                        </div>
+                        <?php endif; ?>
+                        <?php if (!isset($bank_fields_matched_in_order['bank_account_holder'])): ?>
+                        <div class="alpro-field" <?php echo $field_cfg['bank_account_holder']['visible'] ? '' : 'style="display:none;"'; ?>>
+                            <label><?php echo htmlspecialchars($field_cfg['bank_account_holder']['label']); ?> <?php if ($field_cfg['bank_account_holder']['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
+                            <input class="alpro-input" type="text" name="bank_account_holder" form="case-edit" value="<?php echo htmlspecialchars($case['bank_account_holder'] ?? ''); ?>" <?php echo $field_cfg['bank_account_holder']['required'] ? 'required' : ''; ?>>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <div class="aap-bento-item aap-span-12">
+            <div class="aap-card">
+                <h6 class="aap-card-title"><i class="bi bi-paperclip"></i> Evidence Attachments</h6>
+                <div class="alpro-grid">
+                    <div id="evidence-note-view" class="alpro-field">
+                        <label>Evidence Note</label>
+                        <?php // (string) !== '' not a truthy check - a note whose entire text is
+                        // literally "0" (e.g. a Required Information answer of "0") is a
+                        // real, non-empty note, but PHP treats the string "0" as falsy. ?>
+                        <?php if ((string)$case['evidence_note'] !== '' || !empty($case_notes)): ?>
+                            <ul class="aap-attach-list">
+                                <?php if ((string)$case['evidence_note'] !== ''): ?>
+                                    <li style="display:block;">
+                                        <div class="note-view" id="note-view-original">
+                                            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+                                                <div class="note-text" style="height:80px; max-height:400px; overflow-y:auto; resize:vertical; border:1px solid #e9ecef; border-radius:6px; padding:6px 8px; background:#fff; width:100%; box-sizing:border-box;"><?php echo nl2br(htmlspecialchars($case['evidence_note'])); ?></div>
+                                                <?php if ($original_note_editable): ?>
+                                                    <span class="note-actions" style="display:flex; gap:8px; flex-shrink:0;">
+                                                        <button type="button" class="note-edit-toggle" data-note-id="original" title="Edit note" style="background:none; border:none; color:#6c757d; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-pencil"></i></button>
+                                                        <form method="post" action="" style="display:inline;" onsubmit="return aapConfirmDeleteNote();">
+                                                            <input type="hidden" name="action" value="delete_original_note">
+                                                            <button type="submit" title="Remove note" style="background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-trash"></i></button>
+                                                        </form>
+                                                    </span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($case['requester_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y H:i', strtotime($case['timestamp'])); ?></span>
+                                        </div>
+                                        <?php if ($original_note_editable): ?>
+                                        <form method="post" action="" class="note-edit-form" id="note-edit-form-original" style="display:none;" onsubmit="aapRememberEditState();">
+                                            <input type="hidden" name="action" value="edit_original_note">
+                                            <textarea class="alpro-input" name="note" style="height:60px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['evidence_note']); ?></textarea>
+                                            <div class="alpro-actions alpro-mt-10">
+                                                <button class="alpro-btn alpro-btn-blue" type="submit" style="padding:4px 10px; font-size:12px;"><i class="bi bi-check-lg"></i> Save</button>
+                                                <button class="alpro-btn alpro-btn-grey note-edit-cancel" type="button" data-note-id="original" style="padding:4px 10px; font-size:12px;"><i class="bi bi-x-lg"></i> Cancel</button>
+                                            </div>
+                                        </form>
+                                        <?php endif; ?>
+                                    </li>
+                                <?php endif; ?>
+                                <?php foreach ($case_notes as $note): ?>
+                                    <?php $note_editable = aapCaseEvidenceItemEditable($note['created_by'], $note['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at); ?>
+                                    <li style="display:block;">
+                                        <div class="note-view" id="note-view-<?php echo $note['id']; ?>">
+                                            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+                                                <div class="note-text" style="height:80px; max-height:400px; overflow-y:auto; resize:vertical; border:1px solid #e9ecef; border-radius:6px; padding:6px 8px; background:#fff; width:100%; box-sizing:border-box;"><?php echo nl2br(htmlspecialchars($note['note'])); ?></div>
+                                                <?php if ($note_editable): ?>
+                                                    <span class="note-actions" style="display:flex; gap:8px; flex-shrink:0;">
+                                                        <button type="button" class="note-edit-toggle" data-note-id="<?php echo $note['id']; ?>" title="Edit note" style="background:none; border:none; color:#6c757d; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-pencil"></i></button>
+                                                        <form method="post" action="" style="display:inline;" onsubmit="return aapConfirmDeleteNote();">
+                                                            <input type="hidden" name="action" value="delete_case_note">
+                                                            <input type="hidden" name="note_id" value="<?php echo (int)$note['id']; ?>">
+                                                            <button type="submit" title="Remove note" style="background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-trash"></i></button>
+                                                        </form>
+                                                    </span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($note['created_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y H:i', strtotime($note['timestamp'])); ?></span>
+                                        </div>
+                                        <?php if ($note_editable): ?>
+                                        <form method="post" action="" class="note-edit-form" id="note-edit-form-<?php echo $note['id']; ?>" style="display:none;" onsubmit="aapRememberEditState();">
+                                            <input type="hidden" name="action" value="edit_case_note">
+                                            <input type="hidden" name="note_id" value="<?php echo (int)$note['id']; ?>">
+                                            <textarea class="alpro-input" name="note" style="height:60px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($note['note']); ?></textarea>
+                                            <div class="alpro-actions alpro-mt-10">
+                                                <button class="alpro-btn alpro-btn-blue" type="submit" style="padding:4px 10px; font-size:12px;"><i class="bi bi-check-lg"></i> Save</button>
+                                                <button class="alpro-btn alpro-btn-grey note-edit-cancel" type="button" data-note-id="<?php echo $note['id']; ?>" style="padding:4px 10px; font-size:12px;"><i class="bi bi-x-lg"></i> Cancel</button>
+                                            </div>
+                                        </form>
+                                        <?php endif; ?>
+                                    </li>
+                                <?php endforeach; ?>
+                            </ul>
+                        <?php else: ?>
+                            <div>—</div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div>
+                        <?php if (!empty($attachments)): ?>
+                        <ul class="aap-attach-list">
+                            <?php foreach ($attachments as $att): ?>
+                                <?php $att_editable = aapCaseEvidenceItemEditable($att['uploaded_by'], $att['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at); ?>
+                                <li>
+                                    <a href="?id=<?php echo $id; ?>&download=<?php echo $att['id']; ?>"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($att['file_name']); ?></a>
+                                    <span style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($att['uploaded_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($att['timestamp'])); ?></span>
+                                        <?php if ($att_editable): ?>
+                                            <form method="post" action="" class="attachment-delete-form" style="display:inline;" onsubmit="return aapConfirmDeleteAttachment();">
+                                                <input type="hidden" name="action" value="delete_attachment">
+                                                <input type="hidden" name="attachment_id" value="<?php echo (int)$att['id']; ?>">
+                                                <button type="submit" title="Remove attachment" style="background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-trash"></i></button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </span>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <?php else: ?>
+                            <p class="aap-card-hint" style="margin:0;">No files uploaded for this case.</p>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="alpro-field">
+                        <label>Reference Links</label>
+                        <?php if (!empty($reference_links)): ?>
+                        <ul class="aap-attach-list">
+                            <?php foreach ($reference_links as $link): ?>
+                                <?php $link_editable = aapCaseEvidenceItemEditable($link['created_by'], $link['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at); ?>
+                                <li>
+                                    <a href="<?php echo htmlspecialchars($link['url']); ?>" target="_blank" rel="noopener"><i class="bi bi-link-45deg"></i> <?php echo (string)$link['label'] !== '' ? htmlspecialchars($link['label']) . ' &middot; ' . htmlspecialchars($link['url']) : htmlspecialchars($link['url']); ?></a>
+                                    <span style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($link['created_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($link['timestamp'])); ?></span>
+                                        <?php if ($link_editable): ?>
+                                            <form method="post" action="" style="display:inline;" onsubmit="return aapConfirmDeleteReferenceLink();">
+                                                <input type="hidden" name="action" value="delete_reference_link">
+                                                <input type="hidden" name="link_id" value="<?php echo (int)$link['id']; ?>">
+                                                <button type="submit" title="Remove link" style="background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-trash"></i></button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </span>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <?php else: ?>
+                            <p class="aap-card-hint" style="margin:0;">No reference links added.</p>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <?php if ($can_add_evidence): ?>
+                <hr style="border:none; border-top:1px solid #e5e9ec; margin:14px 0;">
+                <h6 class="aap-card-title" style="margin-bottom:10px; padding-bottom:0; border-bottom:none;">Add New Evidence</h6>
+                <form method="post" action="" enctype="multipart/form-data" id="evidence-add-form">
+                <input type="hidden" name="action" value="add_evidence">
+                <div class="alpro-grid alpro-mt-10">
+                    <div class="alpro-field">
+                        <label>Evidence Note</label>
+                        <textarea class="alpro-input" name="new_note" placeholder="Add a note..." style="height:80px; max-height:150px; resize:vertical; overflow-y:auto;"></textarea>
+                    </div>
+                    <div class="alpro-field">
+                        <label>Add More Evidence</label>
+                        <input class="alpro-input" type="file" name="evidence[]" id="evidence-file-input" multiple>
+                        <ul class="aap-attach-list" id="evidence-file-preview" style="margin-top:8px;"></ul>
+                    </div>
+                    <div class="alpro-field">
+                        <label>Reference Link</label>
+                        <input class="alpro-input" type="url" name="new_link_url" placeholder="https://..." style="margin-bottom:8px;">
+                        <input class="alpro-input" type="text" name="new_link_label" placeholder="Label (optional)">
+                    </div>
+                </div>
+                <div class="alpro-actions alpro-mt-10">
+                    <button type="submit" class="alpro-btn aap-btn-action aap-btn-action-outline-primary" style="flex:0 0 auto;"><i class="bi bi-plus-lg"></i> Add Evidence</button>
+                </div>
+                </form>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <?php if ($can_edit_case): ?>
+        <div class="aap-bento-item aap-span-12" id="case-edit-actions" style="display:none;">
+            <div class="aap-card">
+                <div class="alpro-actions" style="justify-content:flex-end;">
+                    <button class="alpro-btn alpro-btn-blue" type="submit" form="case-edit" id="case-edit-save" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px;">Save Changes</button>
+                    <button class="alpro-btn alpro-btn-grey" type="button" id="case-edit-cancel" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px; border:1px solid #000;">Cancel</button>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <div class="aap-bento-item aap-span-12">
+            <div class="aap-card">
+                <h6 class="aap-card-title"><i class="bi bi-clock-history"></i> Audit Trail</h6>
+                <?php if (empty($audit_logs)): ?>
+                    <div class="aap-empty-state">No activity recorded yet.</div>
+                <?php else: ?>
+                    <div class="aap-activity-list">
+                        <?php foreach (array_reverse($audit_logs) as $log): ?>
+                        <div class="aap-activity-row">
+                            <div class="aap-activity-event"><?php echo htmlspecialchars(ucwords(str_replace('_', ' ', $log['event']))); ?></div>
+                            <div class="aap-activity-summary"><?php echo htmlspecialchars($log['summary']); ?></div>
+                            <div class="aap-activity-meta"><?php echo htmlspecialchars($log['actor_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y H:i', strtotime($log['timestamp'])); ?></div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+var AAP_UPDATE = {
+    openInEditMode: <?php echo ($can_edit_case && $case['case_status'] === 'draft') ? 'true' : 'false'; ?>
+};
+</script>
+<?php $page_js = 'js/aap_update.js'; include('aap_footer.php'); ?>

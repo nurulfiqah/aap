@@ -1,0 +1,149 @@
+(function () {
+    'use strict';
+    var BASE = (typeof AAP_BASE !== 'undefined') ? AAP_BASE : '';
+    var API_URL = BASE + 'aap_notifications.php';
+    var VIEW_URL = BASE + 'aap_update.php';
+    var POLL_MS = 8000;
+
+    function escapeHtml(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    function formatDateTime(v) {
+        if (!v) { return ''; }
+        var d = new Date(String(v).replace(' ', 'T'));
+        if (isNaN(d.getTime())) { return v; }
+        var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        var hh = String(d.getHours()).padStart(2, '0');
+        var mm = String(d.getMinutes()).padStart(2, '0');
+        return d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear() + ', ' + hh + ':' + mm;
+    }
+
+    function setBadge(count) {
+        var badge = document.getElementById('aap-notif-badge');
+        if (!badge) { return; }
+        if (count > 0) {
+            badge.textContent = count > 99 ? '99+' : String(count);
+            badge.style.display = 'inline-block';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+
+    function renderList(items) {
+        var list = document.getElementById('aap-notif-list');
+        if (!list) { return; }
+        if (!items.length) {
+            list.innerHTML = '<div style="padding:14px 12px; color:#888; font-size:12px;">No notifications.</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+            var n = items[i];
+            var ref = escapeHtml(n.case_ref);
+            var snippets = {
+                case_approved: 'Case ' + ref + ' has been approved',
+                case_rejected: 'Case ' + ref + ' has been rejected',
+                case_closed: 'Case ' + ref + ' has been closed',
+                case_suspended: 'Case ' + ref + ' was suspended by Execution and needs your attention',
+                pending_approval: 'Case ' + ref + ' is awaiting your approval'
+            };
+            var snippet = snippets[n.type] || ('Case ' + ref + ' has an update');
+            html += '<div class="aap-notif-item" data-id="' + n.id + '" data-case-id="' + n.case_id + '" '
+                + 'style="padding:10px 12px; border-bottom:1px solid #f2f2f2; cursor:pointer; font-size:12px;' + (!n.read_at ? ' background:#f0f7ff;' : '') + '">'
+                + '<div>' + snippet + '</div>'
+                + '<div style="color:#999; font-size:11px; margin-top:2px;">' + escapeHtml(formatDateTime(n.created_at)) + '</div></div>';
+        }
+        list.innerHTML = html;
+    }
+
+    // Guards against overlapping polls (a previous fetch still pending when
+    // the next 8s tick fires, e.g. because the endpoint was momentarily
+    // slow) and against polling at all while the tab is hidden - every AAP
+    // page runs this poll forever in the background, so left unchecked it
+    // can quietly stack up pending same-origin requests behind whatever
+    // fetch-based action the user is actually trying to click (search
+    // dropdowns, AJAX buttons), which share the browser's small per-origin
+    // connection limit and end up queued behind the pile-up - a real click
+    // going nowhere until one of the stuck polls finally resolves. A 10s
+    // abort timeout keeps one genuinely hung request from blocking forever.
+    var pollInFlight = false;
+    function refresh() {
+        if (pollInFlight || document.hidden) return;
+        pollInFlight = true;
+        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 10000) : null;
+        fetch(API_URL + '?action=listNotifications', controller ? { signal: controller.signal } : undefined)
+            .then(function (r) { return r.json(); })
+            .then(function (res) {
+                if (res && res.success) {
+                    setBadge(res.unread_count || 0);
+                    renderList(res.data || []);
+                }
+            })
+            .catch(function () {})
+            .finally(function () {
+                if (timeoutId) clearTimeout(timeoutId);
+                pollInFlight = false;
+            });
+    }
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refresh();
+    });
+
+    document.addEventListener('click', function (e) {
+        var bell = e.target.closest('#aap-notif-bell');
+        if (bell) {
+            e.preventDefault();
+            var menu = document.getElementById('aap-notif-menu');
+            menu.style.display = (menu.style.display === 'none') ? 'block' : 'none';
+            return;
+        }
+
+        var item = e.target.closest('.aap-notif-item');
+        if (item) {
+            var id = item.getAttribute('data-id');
+            var caseId = item.getAttribute('data-case-id');
+            var body = new URLSearchParams();
+            body.set('action', 'markNotificationRead');
+            body.set('id', id);
+            fetch(API_URL, { method: 'POST', body: body }).then(function () {
+                window.location.href = VIEW_URL + '?id=' + caseId;
+            });
+            return;
+        }
+
+        if (e.target.closest('#aap-notif-markall')) {
+            e.preventDefault();
+            var body2 = new URLSearchParams();
+            body2.set('action', 'markAllNotificationsRead');
+            fetch(API_URL, { method: 'POST', body: body2 }).then(refresh);
+            return;
+        }
+
+        if (!e.target.closest('#aap-notif-menu')) {
+            var menu2 = document.getElementById('aap-notif-menu');
+            if (menu2) menu2.style.display = 'none';
+        }
+    });
+
+    refresh();
+    setInterval(refresh, POLL_MS);
+
+    // ---- Fix the outer app's chat-notification icon on admin/ pages ----
+    // lock_adv.php (shared outer-app file, not part of this module - can't
+    // be edited here) renders that icon with a relative src
+    // ('../../odb/common/img/noti.png') that only resolves correctly when
+    // the current page is exactly two folders below the web root, which is
+    // true for aap/*.php but not for aap/admin/*.php (three folders deep) -
+    // the browser ends up requesting a doubled, nonexistent .../odb/odb/...
+    // path there, so the icon just shows as broken. Corrected client-side
+    // to an absolute path instead, which resolves the same regardless of
+    // how deep the current page sits.
+    var chatNotifIcon = document.querySelector('input[type="image"][alt="text"]');
+    if (chatNotifIcon) {
+        chatNotifIcon.src = '/odb/common/img/noti.png';
+    }
+})();

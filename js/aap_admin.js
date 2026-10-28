@@ -1,0 +1,667 @@
+document.addEventListener('DOMContentLoaded', function () {
+    function esc(s) {
+        var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML;
+    }
+
+    // Tier options are that department's own Approval Unit Master tiers (or
+    // the shared Default list if it hasn't customized any) - never a fixed
+    // Unlimited/Tier 1/Tier 2 list. Cached per department_id since the same
+    // department is looked up repeatedly (row renders, re-renders on staff
+    // pick, etc).
+    var tierOptionsCache = {};
+    function getTierOptions(deptId) {
+        if (tierOptionsCache[deptId]) return tierOptionsCache[deptId];
+        var p = fetch('?action=get_tier_options&department_id=' + encodeURIComponent(deptId))
+            .then(function (r) { return r.json(); })
+            .then(function (res) { return res.success ? res.tiers : []; })
+            .catch(function () { return []; });
+        tierOptionsCache[deptId] = p;
+        return p;
+    }
+
+    // One Department -> Group table block, for Level 2 (approval) - Level 3
+    // is a plain Execution Team department picker now (2026-10-19), not a
+    // Staff Tier table, so this only ever has one instance these days.
+    // Returns { addRow, collectRows } so edit-mode prefill can push existing
+    // rows in and the submit handler below can serialize the table.
+    //
+    // Only one Group per level - picking a Group replaces the whole table
+    // with every staff member belonging to it (admin/aap_grouping_master.php),
+    // each starting at the tier they hold there, no explicit Add step.
+    // Picking a different Group (or clearing the Department) replaces/clears
+    // the table rather than appending to it. Each row's Tier cell shows that
+    // row's own department's real tier name/value, read-only - fix it at the
+    // Group (Approval Unit Master) and re-pick if it's wrong.
+    function initStaffTier(ids) {
+        var deptSelect = document.getElementById(ids.dept);
+        var groupSelect = document.getElementById(ids.group);
+        var tierTbody = document.getElementById(ids.tbody);
+        if (!deptSelect) return null;
+
+        // Group Name alone ("Group 1") isn't enough to tell Groups apart -
+        // Description is what an admin actually set it up for (e.g.
+        // "Academy Moodle"), so show both: "Group 1: Academy Moodle".
+        // Falls back to just the name if no Description has been set yet.
+        //
+        // permissionLocked captures whatever this select's `disabled` state
+        // was rendered as server-side (aap_admin.php's $edit_rights gate) -
+        // preserved across every re-render below rather than letting the
+        // single-option auto-select path (which also sets `disabled`)
+        // accidentally re-enable a select the current editor isn't entitled
+        // to touch at all.
+        var permissionLocked = groupSelect ? groupSelect.disabled : false;
+        function renderGroupOptions(groups) {
+            if (!groupSelect) return;
+            // Exactly one real choice (typically "Default (Universal)" when
+            // the department has no custom Groups set up) - a dropdown that
+            // only ever resolves to the same option makes the admin click
+            // through it for nothing, so skip the picker: show that one
+            // option fixed and disabled, and load its roster automatically
+            // instead of waiting for a "change" event that never comes.
+            if (groups.length === 1) {
+                var only = groups[0];
+                var onlyLabel = only.description ? (only.group_name + ': ' + only.description) : only.group_name;
+                groupSelect.innerHTML = '<option value="' + only.id + '">' + esc(onlyLabel) + '</option>';
+                groupSelect.value = String(only.id);
+                groupSelect.disabled = true;
+                applyGroupSelection();
+                return;
+            }
+            groupSelect.disabled = permissionLocked;
+            groupSelect.innerHTML = '<option value="">Select Group</option>' + groups.map(function (g) {
+                var label = g.description ? (g.group_name + ': ' + g.description) : g.group_name;
+                return '<option value="' + g.id + '">' + esc(label) + '</option>';
+            }).join('');
+        }
+
+        // preselectGroupId is only ever passed on the very first load (the
+        // Case Type's already-saved Group, if any) - once the picker's up and
+        // running, a later "change" on the Department select means the user
+        // is actively re-picking, so that always starts back at "Select
+        // Group" rather than trying to guess a group in the new department.
+        function loadDeptGroups(preselectGroupId) {
+            if (!groupSelect) return;
+            var deptId = deptSelect.value;
+            if (!deptId) {
+                renderGroupOptions([]);
+                return;
+            }
+            fetch('?action=get_dept_groups&department_id=' + encodeURIComponent(deptId))
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    renderGroupOptions(res.success ? res.groups : []);
+                    if (preselectGroupId !== undefined && preselectGroupId !== null) {
+                        var opt = groupSelect.querySelector('option[value="' + preselectGroupId + '"]');
+                        // The already-saved assignment was Default (Universal),
+                        // but this department has since set up its own Group(s)
+                        // - get_dept_groups only offers Default as a fallback
+                        // when there are NONE, so it won't be in the list here.
+                        // Add it back in just so what's actually saved still
+                        // shows correctly, instead of a blank "Select Group".
+                        if (!opt && preselectGroupId === '0') {
+                            opt = document.createElement('option');
+                            opt.value = '0';
+                            opt.textContent = 'Default (Universal)';
+                            groupSelect.insertBefore(opt, groupSelect.options[1] || null);
+                        }
+                        if (opt) groupSelect.value = preselectGroupId;
+                    }
+                })
+                .catch(function () {
+                    renderGroupOptions([]);
+                });
+        }
+
+        deptSelect.addEventListener('change', function () { loadDeptGroups(); });
+        loadDeptGroups(ids.currentGroupId);
+
+        function fetchGroupStaffTiers(deptId, groupId) {
+            return fetch('?action=get_group_staff_tiers&department_id=' + encodeURIComponent(deptId) + '&group_id=' + encodeURIComponent(groupId))
+                .then(function (r) { return r.json(); })
+                .then(function (res) { return res.success ? res.staff : []; })
+                .catch(function () { return []; });
+        }
+
+        // A row's Tier is read-only text, not a picker - who's in a Group and
+        // what tier they hold there is decided in admin/aap_grouping_master.php
+        // (the Approval Unit Master), not per Case Type. There's no × either:
+        // membership follows that Group's setup, so removing someone here
+        // would just silently drift from it. To change who's assigned or at
+        // what tier, fix it at the source (the Group) and re-Add.
+        function tierDisplayHtml(tiers, tierName) {
+            var t = tiers.find(function (x) { return x.tier_name === tierName; });
+            return t ? esc(t.tier_name) : esc(tierName || '');
+        }
+
+        // Adding a staff member already in the table just updates their row
+        // (department + Group + tier) instead of creating a duplicate.
+        // groupId is stamped onto the row so the server can save it onto
+        // aap_case_type_staff_tiers.group_id - lets the live approval gate
+        // resolve this staff member's tier against that exact Group instead
+        // of an ambiguous department-wide match (see sql/aap_master.sql).
+        // null/0 (the "Default (Universal)" entry, or an edit-mode row saved
+        // before group_id existed) is sent through as-is.
+        function addRow(staffId, staffName, deptId, tier, groupId) {
+            var existing = tierTbody.querySelector('tr[data-staff-id="' + staffId + '"]');
+            var tr = existing || document.createElement('tr');
+            tr.setAttribute('data-staff-id', staffId);
+            tr.setAttribute('data-department-id', deptId);
+            tr.setAttribute('data-tier', tier || '');
+            if (groupId === null || groupId === undefined || groupId === '' || groupId === 0 || groupId === '0') {
+                tr.removeAttribute('data-group-id');
+            } else {
+                tr.setAttribute('data-group-id', groupId);
+            }
+            tr.innerHTML = '<td>' + esc(staffName) + '</td><td class="ct-pool-tier-cell">Loading...</td>';
+            if (!existing) tierTbody.appendChild(tr);
+
+            getTierOptions(deptId).then(function (tiers) {
+                tr.querySelector('.ct-pool-tier-cell').innerHTML = tierDisplayHtml(tiers, tier);
+            });
+        }
+
+        // Picking a Group fully replaces the table - it's this level's only
+        // Group, not one of several being accumulated. Named (not inline)
+        // since renderGroupOptions() above also calls this directly when
+        // there's only one Group to auto-select - a real "change" event
+        // never fires for that case since nothing changed by user action.
+        function applyGroupSelection() {
+            if (!groupSelect) return;
+            var groupId = groupSelect.value;
+            var deptId = deptSelect.value;
+            tierTbody.innerHTML = '';
+            if (!groupId || !deptId) return;
+            fetchGroupStaffTiers(deptId, groupId).then(function (staff) {
+                staff.forEach(function (st) {
+                    addRow(st.staff_id, st.staff_name, deptId, st.tier, st.group_id);
+                });
+            });
+        }
+        if (groupSelect) {
+            groupSelect.addEventListener('change', applyGroupSelection);
+        }
+        // Clearing/changing the Department invalidates whatever Group was
+        // picked under the previous one - clear the table so it can't
+        // silently keep a stale department's staff.
+        deptSelect.addEventListener('change', function () { tierTbody.innerHTML = ''; });
+
+        function collectRows() {
+            return Array.prototype.map.call(tierTbody.querySelectorAll('tr'), function (tr) {
+                return {
+                    staff_id: tr.getAttribute('data-staff-id'),
+                    department_id: tr.getAttribute('data-department-id'),
+                    group_id: tr.getAttribute('data-group-id'),
+                    tier: tr.getAttribute('data-tier')
+                };
+            });
+        }
+
+        return { addRow: addRow, collectRows: collectRows, deptSelect: deptSelect };
+    }
+
+    // The Group dropdown itself doesn't carry a "current selection" from the
+    // server the way the Department dropdown does - it's derived here from
+    // whichever Group the already-saved rows actually belong to (they can
+    // only ever belong to one, per Case Type/section). null group_id on a
+    // saved row means the Default (Universal) entry, whose option value is
+    // the "0" sentinel (see aapFetchDepartmentGroupNames() in aap_lib.php).
+    function firstGroupId(tiers) {
+        if (!tiers || !tiers.length) return null;
+        var g = tiers[0].group_id;
+        return (g === null || g === undefined) ? '0' : String(g);
+    }
+
+    var approvalTier = initStaffTier({ dept: 'ct_pool_department', group: 'ct_pool_group', tbody: 'ct_staff_tier_tbody', currentGroupId: firstGroupId(AAP_ADMIN.approvalTiers) });
+    var executionTier = initStaffTier({ dept: 'ct_pool_department_lvl3', group: 'ct_pool_group_lvl3', tbody: 'ct_staff_tier_tbody_lvl3', currentGroupId: firstGroupId(AAP_ADMIN.executionTiers) });
+
+    // HOD Approval Only has no department to pick at all any more - it's
+    // resolved per case (the HOD of whoever raised that specific case), not
+    // fixed on the Case Type - so the whole Department+Group row and Staff
+    // Tier table hide while checked (irrelevant in HOD mode - the save
+    // handler ignores whatever's in them either way, see
+    // aapSaveCaseTypeHodOnly() in admin/aap_admin.php), replaced by a plain
+    // explanatory note.
+    function wireHodOnlyToggle(checkboxId, rowId, noteId, tableWrapId) {
+        var checkbox = document.getElementById(checkboxId);
+        var row = document.getElementById(rowId);
+        var note = document.getElementById(noteId);
+        var tableWrap = document.getElementById(tableWrapId);
+        if (!checkbox) return;
+        function apply() {
+            var on = checkbox.checked;
+            if (row) row.style.display = on ? 'none' : 'flex';
+            if (note) note.style.display = on ? 'block' : 'none';
+            if (tableWrap) tableWrap.hidden = on;
+        }
+        checkbox.addEventListener('change', apply);
+        apply();
+    }
+    wireHodOnlyToggle('ct_level2_hod_only', 'ct_deptgroup_row', 'ct_hod_note', 'ct_staff_tier_wrap');
+    wireHodOnlyToggle('ct_level3_hod_only', 'ct_deptgroup_row_lvl3', 'ct_hod_note_lvl3', 'ct_staff_tier_wrap_lvl3');
+
+    // Editing an existing Case Type - prefill both tables from what's already
+    // saved (AAP_ADMIN.approvalTiers/executionTiers, from aap_admin.php).
+    if (!AAP_ADMIN.isNew) {
+        (AAP_ADMIN.approvalTiers || []).forEach(function (r) {
+            if (approvalTier) approvalTier.addRow(r.staff_id, r.staff_name, r.department_id, r.tier, r.group_id);
+        });
+        (AAP_ADMIN.executionTiers || []).forEach(function (r) {
+            if (executionTier) executionTier.addRow(r.staff_id, r.staff_name, r.department_id, r.tier, r.group_id);
+        });
+    }
+
+    // ---- Instruction for User builder - main points with nested sub-points,
+    // numbered (1, 1.1, 1.2, 2, 2.1, ...) purely from array order; the admin
+    // never types a number, so reordering/removing never leaves gaps or
+    // duplicates. Numbers are display-only and recomputed on every render -
+    // never stored. Re-rendering the whole list on every add/remove (rather
+    // than patching the DOM) is simple and fine here since it only happens
+    // on a button click, never mid-keystroke (each input's own 'input'
+    // listener just updates the backing `data` array, no re-render). Server
+    // re-validates this shape independently on submit
+    // (aapSanitizeCaseTypeInstructions() in admin/aap_admin.php) - never
+    // trusts this JSON as-is. ----
+    var instructionsBuilder = (function () {
+        var container = document.getElementById('ct_instructions_builder');
+        if (!container) return null;
+        var addMainBtn = document.getElementById('ct_instructions_add_main');
+        var readonly = container.dataset.readonly === '1';
+        // Quick-add table (admin/aap_admin.php) - ticking a Form Master
+        // field's checkbox adds it as a Main Point with no sub-points;
+        // unticking removes that exact Main Point again. Matched by exact
+        // text, so manually retyping a Main Point away from a field's label
+        // just stops that checkbox tracking it (see syncFieldToggles() below).
+        var fieldToggles = Array.prototype.slice.call(document.querySelectorAll('.ct-instr-field-toggle'));
+
+        // Same exact-label match aap_lib.php's aapCaseTypeFieldOrder() uses
+        // server-side (against Form Master's DEFAULT labels, not whatever
+        // the admin may have renamed them to in Form Master settings) - a
+        // point matching one of these already has its real input/required-
+        // ness controlled by Form Master, so Type/Required here would be
+        // dead UI for it (and misleadingly implies this builder controls
+        // something it doesn't).
+        var formMasterLabels = fieldToggles.map(function (cb) { return cb.dataset.fieldLabel.trim().toLowerCase(); });
+        function isFormMasterMatch(text) {
+            return formMasterLabels.indexOf(text.trim().toLowerCase()) !== -1;
+        }
+
+        // A point not matched to a Form Master field (aapCaseTypeFieldOrder()
+        // in aap_lib.php) becomes its own field on aap_add.php/
+        // aap_update.php and on Fixit's "Required Information"
+        // (fixit/ajax.php) - type/options here is that field's answer type,
+        // same Number/Dropdown/Textarea choice Form Master's own Additional
+        // Fields use, just picked per-point. Ignored entirely for a point
+        // that DOES match a Form Master field - that field's own real input
+        // is used instead. Backward compatible with the pre-type schema,
+        // where a sub was just a plain string.
+        function normalizePoint(p) {
+            p = (typeof p === 'string') ? { text: p } : (p || {});
+            return {
+                text: p.text || '',
+                type: ['text', 'number', 'dropdown'].indexOf(p.type) !== -1 ? p.type : 'text',
+                options: (p.options || []).slice(),
+                required: p.required !== false,
+                // Asks for a supporting file alongside this point's own
+                // answer (e.g. Customer Name -> IC photo) - rendered as its
+                // own file input on aap_add.php/Fixit's Required Information,
+                // uploaded as a regular evidence attachment. Defaults off -
+                // unlike `required`, most points never needed this before it
+                // existed, so there's no backward-compatible "on" default.
+                requires_attachment: p.requires_attachment === true
+            };
+        }
+        var data = (AAP_ADMIN.instructions || []).map(function (m) {
+            var point = normalizePoint(m);
+            point.subs = (m.subs || []).map(normalizePoint);
+            return point;
+        });
+
+        function row(html) {
+            var div = document.createElement('div');
+            div.innerHTML = html;
+            return div.firstElementChild;
+        }
+
+        function typeSelectHtml(selectedType) {
+            var opts = [['text', 'Text'], ['number', 'Number'], ['dropdown', 'Dropdown']];
+            var html = '<select class="alpro-input aap-instr-type" style="height:32px; padding:2px 6px; font-size:12px; width:110px;" ' + (readonly ? 'disabled' : '') + '>';
+            opts.forEach(function (o) {
+                html += '<option value="' + o[0] + '"' + (o[0] === selectedType ? ' selected' : '') + '>' + o[1] + '</option>';
+            });
+            return html + '</select>';
+        }
+
+        // Only meaningful for a point that ends up NOT matching a Form
+        // Master field (see aapValidateExtraInstructionFields() in
+        // aap_lib.php) - a matched point is always required regardless,
+        // same as every other Form Master field under REPLACE semantics.
+        function requiredCheckboxHtml(checked) {
+            return '<label style="display:flex; align-items:center; gap:3px; font-size:11px; white-space:nowrap; cursor:pointer;" title="Required">' +
+                '<input type="checkbox" class="aap-instr-required" ' + (checked ? 'checked' : '') + ' ' + (readonly ? 'disabled' : '') + '> Req</label>';
+        }
+
+        // Only meaningful for a point that ends up NOT matching a Form
+        // Master field, same as requiredCheckboxHtml() above.
+        function requiresAttachmentCheckboxHtml(checked) {
+            return '<label style="display:flex; align-items:center; gap:3px; font-size:11px; white-space:nowrap; cursor:pointer;" title="Requires a supporting file/photo">' +
+                '<input type="checkbox" class="aap-instr-requires-attachment" ' + (checked ? 'checked' : '') + ' ' + (readonly ? 'disabled' : '') + '> Attach</label>';
+        }
+
+        // Renders one point's (main OR sub) extra "Type" select + Options
+        // textarea beneath its text row - shared between main/sub rendering
+        // below so the two stay in sync.
+        function renderPointExtras(point, wrapEl, onChange) {
+            var typeSelect = wrapEl.querySelector('.aap-instr-type');
+            var requiredCheckbox = wrapEl.querySelector('.aap-instr-required');
+            var requiresAttachmentCheckbox = wrapEl.querySelector('.aap-instr-requires-attachment');
+            var optionsWrap = row('<div style="margin-top:4px; display:' + (point.type === 'dropdown' ? 'block' : 'none') + ';"><textarea class="alpro-input aap-instr-options" placeholder="Options, one per line" style="height:50px; font-size:12px;" ' + (readonly ? 'disabled' : '') + '>' + esc(point.options.join('\n')) + '</textarea></div>');
+            wrapEl.parentNode.insertBefore(optionsWrap, wrapEl.nextSibling);
+            if (!readonly) {
+                typeSelect.addEventListener('change', function (e) {
+                    point.type = e.target.value;
+                    onChange();
+                });
+                optionsWrap.querySelector('textarea').addEventListener('input', function (e) {
+                    point.options = e.target.value.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
+                });
+                if (requiredCheckbox) {
+                    requiredCheckbox.addEventListener('change', function (e) {
+                        point.required = e.target.checked;
+                    });
+                }
+                if (requiresAttachmentCheckbox) {
+                    requiresAttachmentCheckbox.addEventListener('change', function (e) {
+                        point.requires_attachment = e.target.checked;
+                    });
+                }
+            }
+        }
+
+        function render() {
+            container.innerHTML = '';
+            if (!data.length) {
+                container.appendChild(row('<p class="alpro-muted" style="font-size:12px; margin:0;">No instructions added yet.</p>'));
+            }
+            data.forEach(function (main, mi) {
+                var mainMatched = isFormMasterMatch(main.text);
+                var mainRow = row(
+                    '<div style="display:flex; gap:8px; align-items:center; margin-top:' + (mi === 0 ? '0' : '10px') + ';">' +
+                    '<span style="font-weight:600; font-size:12px; min-width:28px;">' + (mi + 1) + '.</span>' +
+                    '<input type="text" class="alpro-input" placeholder="Main point" value="' + esc(main.text) + '" style="flex:1; height:32px; padding:4px 8px; font-size:13px;" ' + (readonly ? 'disabled' : '') + '>' +
+                    (mainMatched ? '' : typeSelectHtml(main.type) + requiredCheckboxHtml(main.required) + requiresAttachmentCheckboxHtml(main.requires_attachment)) +
+                    (readonly ? '' :
+                        '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-add-sub" style="padding:3px 8px; font-size:11px; white-space:nowrap;">+ Sub</button>' +
+                        '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-remove-main" style="padding:3px 8px; font-size:11px;">&times;</button>') +
+                    '</div>'
+                );
+                container.appendChild(mainRow);
+                mainRow.querySelector('input[type="text"]').addEventListener('input', function (e) { main.text = e.target.value; });
+                if (!mainMatched) renderPointExtras(main, mainRow, render);
+                if (!readonly) {
+                    mainRow.querySelector('.aap-instr-add-sub').addEventListener('click', function () { main.subs.push(normalizePoint('')); render(); });
+                    mainRow.querySelector('.aap-instr-remove-main').addEventListener('click', function () { data.splice(mi, 1); render(); });
+                }
+
+                if (main.subs.length) {
+                    var subsWrap = row('<div style="margin-left:36px; margin-top:4px;"></div>');
+                    main.subs.forEach(function (sub, si) {
+                        var subMatched = isFormMasterMatch(sub.text);
+                        var subRow = row(
+                            '<div style="display:flex; gap:8px; align-items:center; margin-top:4px;">' +
+                            '<span style="font-size:12px; color:#6c757d; min-width:36px;">' + (mi + 1) + '.' + (si + 1) + '</span>' +
+                            '<input type="text" class="alpro-input" placeholder="Sub point" value="' + esc(sub.text) + '" style="flex:1; height:30px; padding:4px 8px; font-size:12px;" ' + (readonly ? 'disabled' : '') + '>' +
+                            (subMatched ? '' : typeSelectHtml(sub.type) + requiredCheckboxHtml(sub.required) + requiresAttachmentCheckboxHtml(sub.requires_attachment)) +
+                            (readonly ? '' : '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-remove-sub" style="padding:2px 7px; font-size:11px;">&times;</button>') +
+                            '</div>'
+                        );
+                        subsWrap.appendChild(subRow);
+                        subRow.querySelector('input[type="text"]').addEventListener('input', function (e) { main.subs[si].text = e.target.value; });
+                        if (!subMatched) renderPointExtras(sub, subRow, render);
+                        if (!readonly) {
+                            subRow.querySelector('.aap-instr-remove-sub').addEventListener('click', function () { main.subs.splice(si, 1); render(); });
+                        }
+                    });
+                    container.appendChild(subsWrap);
+                }
+            });
+            syncFieldToggles();
+        }
+
+        // Keeps each quick-add checkbox's checked state matching whether a
+        // Main Point with that exact label (no sub-points required either
+        // way) currently exists - run after every render() so a manual edit
+        // via the builder itself (removing/retyping a Main Point) stays in
+        // sync too, not just checkbox-driven changes.
+        function syncFieldToggles() {
+            fieldToggles.forEach(function (cb) {
+                var label = cb.dataset.fieldLabel;
+                cb.checked = data.some(function (m) { return m.text.trim() === label; });
+            });
+            applyGroupExclusivity();
+        }
+
+        // Customer Name/Membership ID ("customer" group) and Staff Name
+        // ("staff" group) are mutually exclusive - a case is either Customer
+        // or Staff, never both, so ticking any field in one group disables
+        // the other group's checkbox(es) rather than letting the admin add
+        // Main Points for both at once.
+        function applyGroupExclusivity() {
+            var customerChecked = fieldToggles.some(function (cb) { return cb.dataset.group === 'customer' && cb.checked; });
+            var staffChecked = fieldToggles.some(function (cb) { return cb.dataset.group === 'staff' && cb.checked; });
+            fieldToggles.forEach(function (cb) {
+                if (cb.dataset.group === 'customer') cb.disabled = staffChecked;
+                if (cb.dataset.group === 'staff') cb.disabled = customerChecked;
+            });
+        }
+
+        fieldToggles.forEach(function (cb) {
+            cb.addEventListener('change', function () {
+                var label = cb.dataset.fieldLabel;
+                if (cb.checked) {
+                    if (!data.some(function (m) { return m.text.trim() === label; })) {
+                        var point = normalizePoint(label);
+                        point.subs = [];
+                        data.push(point);
+                    }
+                } else {
+                    data = data.filter(function (m) { return m.text.trim() !== label; });
+                }
+                render();
+            });
+        });
+
+        if (addMainBtn) {
+            addMainBtn.addEventListener('click', function () {
+                var point = normalizePoint('');
+                point.subs = [];
+                data.push(point);
+                render();
+            });
+        }
+
+        render();
+
+        function collectPoint(p) {
+            return { text: p.text.trim(), type: p.type, options: p.options.slice(), required: p.required, requires_attachment: p.requires_attachment };
+        }
+
+        return {
+            collect: function () {
+                return data
+                    .map(function (m) {
+                        var out = collectPoint(m);
+                        out.subs = m.subs.map(collectPoint).filter(function (s) { return s.text !== ''; });
+                        return out;
+                    })
+                    .filter(function (m) { return m.text !== '' || m.subs.length; });
+            }
+        };
+    })();
+
+    // Serialize both Staff Tier tables into the hidden JSON inputs the
+    // save_case_type PHP handler reads (see aapSaveCaseTypeStaffTiers() in
+    // admin/aap_admin.php).
+    var form = document.querySelector('.aap-ct-card form');
+    var approvalJsonInput = document.getElementById('ct_approval_tiers_json');
+    var executionJsonInput = document.getElementById('ct_execution_tiers_json');
+    var instructionsJsonInput = document.getElementById('ct_instructions_json');
+    if (form) {
+        form.addEventListener('submit', function (e) {
+            var approvalRows = approvalTier ? approvalTier.collectRows() : [];
+            var executionRows = executionTier ? executionTier.collectRows() : [];
+            if (approvalJsonInput) approvalJsonInput.value = JSON.stringify(approvalRows);
+            if (executionJsonInput) executionJsonInput.value = JSON.stringify(executionRows);
+            if (instructionsJsonInput && instructionsBuilder) instructionsJsonInput.value = JSON.stringify(instructionsBuilder.collect());
+
+            // Level 2/3 Staff Tier is required UNLESS that level is HOD
+            // Approval Only - HOD mode has no Staff Tier roster at all by
+            // design (the approver/executor is resolved per case instead,
+            // see aapCanApprove()/aapCanExecute() in aap_lib.php), so an
+            // empty table there is correct, not an error.
+            var level2HodOnly = document.getElementById('ct_level2_hod_only');
+            var level3HodOnly = document.getElementById('ct_level3_hod_only');
+            if (!approvalRows.length && !(level2HodOnly && level2HodOnly.checked)) {
+                e.preventDefault();
+                alert('At least one Group must be added under Level 2 - Approval Mode Assign.');
+                return;
+            }
+            if (!executionRows.length && !(level3HodOnly && level3HodOnly.checked)) {
+                e.preventDefault();
+                alert('At least one Group must be added under Level 3 - Execution Team.');
+                return;
+            }
+        });
+    }
+
+    // ---- Filter + pagination for the Case Type Registry table below - all
+    // rows are already in the DOM (rendered server-side), filtering and
+    // paging both happen purely client-side. Same DataTables-style controls
+    // as the Department Tiers list on admin/aap_grouping_master.php. ----
+    (function () {
+        var tbody = document.getElementById('ct_list_tbody');
+        if (!tbody) return;
+        var allRows = Array.prototype.slice.call(tbody.querySelectorAll('.ct-list-row'));
+        var nameInput = document.getElementById('ct_filter_name');
+        var deptSelect = document.getElementById('ct_filter_dept');
+        var approvalInput = document.getElementById('ct_filter_approval');
+        var executionInput = document.getElementById('ct_filter_execution');
+        var physicalSelect = document.getElementById('ct_filter_physical');
+        var statusSelect = document.getElementById('ct_filter_status');
+        var pageSizeSelect = document.getElementById('ct_page_size');
+        var showingEl = document.getElementById('ct_page_showing');
+        var numbersEl = document.getElementById('ct_page_numbers');
+        var currentPage = 1;
+
+        function pageSize() { return parseInt(pageSizeSelect.value, 10) || 10; }
+
+        function matching() {
+            var name = nameInput.value.trim().toLowerCase();
+            var dept = deptSelect ? deptSelect.value : '';
+            var approval = approvalInput.value.trim().toLowerCase();
+            var execution = executionInput.value.trim().toLowerCase();
+            var physical = physicalSelect.value;
+            var status = statusSelect.value;
+            return allRows.filter(function (r) {
+                if (name && r.getAttribute('data-name').indexOf(name) === -1) return false;
+                if (dept && r.getAttribute('data-dept') !== dept) return false;
+                if (approval && r.getAttribute('data-approval').indexOf(approval) === -1) return false;
+                if (execution && r.getAttribute('data-execution').indexOf(execution) === -1) return false;
+                if (physical && r.getAttribute('data-physical') !== physical) return false;
+                if (status && r.getAttribute('data-status') !== status) return false;
+                return true;
+            });
+        }
+
+        function pageButtonList(current, total) {
+            var pages = [];
+            for (var p = 1; p <= total; p++) {
+                if (p === 1 || p === total || Math.abs(p - current) <= 1) pages.push(p);
+            }
+            var out = [];
+            var prev = null;
+            pages.forEach(function (p) {
+                if (prev !== null && p - prev > 1) out.push('...');
+                out.push(p);
+                prev = p;
+            });
+            return out;
+        }
+
+        function pageBtn(label, opts) {
+            opts = opts || {};
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = label;
+            btn.className = 'alpro-btn';
+            btn.style.padding = '4px 10px';
+            btn.style.fontSize = '12px';
+            btn.style.minWidth = '32px';
+            if (opts.active) {
+                btn.style.background = '#0d6efd';
+                btn.style.color = '#fff';
+                btn.style.border = '1px solid #0d6efd';
+            } else if (opts.disabled) {
+                btn.style.background = '#f8f9fa';
+                btn.style.color = '#adb5bd';
+                btn.style.border = '1px solid #e5e9ec';
+                btn.disabled = true;
+            } else {
+                btn.style.background = '#fff';
+                btn.style.color = '#212529';
+                btn.style.border = '1px solid #dee2e6';
+            }
+            if (opts.onClick) btn.addEventListener('click', opts.onClick);
+            return btn;
+        }
+
+        function renderPage() {
+            var matched = matching();
+            var size = pageSize();
+            var totalPages = Math.max(1, Math.ceil(matched.length / size));
+            if (currentPage > totalPages) currentPage = totalPages;
+            var start = (currentPage - 1) * size;
+            var pageRows = matched.slice(start, start + size);
+
+            allRows.forEach(function (r) { r.style.display = 'none'; });
+            pageRows.forEach(function (r) { r.style.display = ''; });
+
+            showingEl.textContent = matched.length
+                ? ('Showing ' + (start + 1) + ' to ' + (start + pageRows.length) + ' of ' + matched.length + ' entries')
+                : 'No case types match.';
+
+            numbersEl.innerHTML = '';
+            numbersEl.appendChild(pageBtn('Previous', {
+                disabled: currentPage <= 1,
+                onClick: function () { currentPage--; renderPage(); }
+            }));
+            pageButtonList(currentPage, totalPages).forEach(function (p) {
+                if (p === '...') {
+                    var span = document.createElement('span');
+                    span.textContent = '...';
+                    span.style.padding = '0 4px';
+                    span.style.color = '#adb5bd';
+                    numbersEl.appendChild(span);
+                } else {
+                    numbersEl.appendChild(pageBtn(String(p), {
+                        active: p === currentPage,
+                        onClick: function () { currentPage = p; renderPage(); }
+                    }));
+                }
+            });
+            numbersEl.appendChild(pageBtn('Next', {
+                disabled: currentPage >= totalPages,
+                onClick: function () { currentPage++; renderPage(); }
+            }));
+        }
+
+        [nameInput, approvalInput, executionInput].forEach(function (el) {
+            el.addEventListener('input', function () { currentPage = 1; renderPage(); });
+        });
+        [deptSelect, physicalSelect, statusSelect, pageSizeSelect].forEach(function (el) {
+            if (!el) return;
+            el.addEventListener('change', function () { currentPage = 1; renderPage(); });
+        });
+
+        renderPage();
+    })();
+});

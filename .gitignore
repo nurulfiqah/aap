@@ -1,0 +1,9 @@
+# Secrets - never commit real credentials (nas_config.php is tracked: it only reads .env)
+/.env
+
+# Local Claude Code settings - per developer, not part of the module
+/.claude/
+
+# Logs / uploaded files - can hold staff or customer data
+*.log
+/uploads/

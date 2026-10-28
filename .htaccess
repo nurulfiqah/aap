@@ -1,0 +1,15 @@
+# Developer-only files - never serve them: dotfiles (.env holds the NAS login), notes, SQL dumps.
+<FilesMatch "(^\.|\.(md|sql|log|example)$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# The server copy is a git clone: never serve the .git folder (FilesMatch above only checks file names, not folders)
+<IfModule mod_alias.c>
+    RedirectMatch 404 /\.git(/|$)
+</IfModule>
