@@ -794,27 +794,3 @@ JOIN (
     SELECT 'Tier 0', 0
 ) g ON g.tier_name = t.tier_name
 WHERE t.department_id IS NULL;
-
--- --------------------------------------------------------
--- aap_department_managers
--- A per-department allowlist of staff who can manage that department's
--- Case Types (admin/aap_admin.php), Approval Unit Groups (admin/
--- aap_grouping_master.php - their own department's Groups only, never the
--- shared Universal list), and Staff Assignments lookups (admin/
--- aap_staff_assignments.php) - granted on top of the normal
--- staff.department/grade-based scoping (aapDeptInScope() in aap_lib.php),
--- never in place of it. Deliberately ungated by grade or staff.department -
--- being on this list is enough by itself, same as how fixit_department's
--- Person Incharge names a department's contact without checking their
--- grade. Managed from admin/aap_department_managers.php (admin-only).
--- --------------------------------------------------------
-
-CREATE TABLE `aap_department_managers` (
-  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `department_id` INT UNSIGNED NOT NULL,
-  `staff_id` INT UNSIGNED NOT NULL,
-  `created_by` INT NULL DEFAULT NULL,
-  `timestamp` DATETIME NOT NULL,
-  UNIQUE KEY `uq_dept_manager` (`department_id`, `staff_id`),
-  KEY `idx_dept_manager_dept` (`department_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

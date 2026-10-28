@@ -42,11 +42,6 @@ $aap_is_superadmin_nav = $aap_is_superadmin_nav ?? $aap_is_superadmin
         <a href="<?php echo $admin_prefix; ?>aap_grouping_master.php" class="alpro-btn <?php echo ($current_page == 'aap_grouping_master.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Approval Units</a>
         <a href="<?php echo $admin_prefix; ?>aap_staff_assignments.php" class="alpro-btn <?php echo ($current_page == 'aap_staff_assignments.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Staff Assignments</a>
         <?php endif; ?>
-        <?php // Nav link hidden - Department Managers don't manage anything
-        // any more (see above), so this page has no real purpose left.
-        // admin/aap_department_managers.php itself is untouched (still
-        // reachable directly, still admin-gated internally) in case the role
-        // gets reinstated later - only the nav link is hidden here. ?>
         <?php if ($aap_is_superadmin_nav): ?>
         <!-- Admin always stays the LAST button in this group, whatever else is
         visible above it (Add Case Type/Approval Units/Staff Assignments/

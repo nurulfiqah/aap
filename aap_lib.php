@@ -117,31 +117,6 @@ function aapDeptInScope($department_id, $dept_ids, $can_manage_all) {
     return $can_manage_all || in_array((int)$department_id, $dept_ids, true);
 }
 
-// Department Managers = staff with staff.aap = 2. staff.aap has three
-// levels: 0 = no access, 1 = full admin (aapFetchIsSuperAdmin()/
-// aapIsAdmin() below), 2 = Department Manager. Set via
-// admin/aap_department_managers.php's own Grant Access panel, not
-// admin/aap_settings.php (which deliberately excludes level 2 entirely).
-//
-// As of 2026-10-19, being a manager no longer grants anything on
-// admin/aap_admin.php (Case Types), admin/aap_grouping_master.php (Approval
-// Unit Groups), or admin/aap_staff_assignments.php - all three were made
-// strictly admin-only ($aap_can_manage_all_depts = $aap_is_superadmin,
-// hardcoded in each file instead of calling aapCanManageAllDepartments()),
-// so this function's result is no longer merged into those pages' $dept_ids
-// at all. A manager can still open admin/aap_department_managers.php itself
-// to view (read-only) their own granted department(s). Kept rather than
-// deleted in case the role is reinstated for one of these pages later.
-function aapFetchDeptManagerDepartmentIds($conn, $staff_id) {
-    if (empty($staff_id)) return [];
-    $stmt = $conn->prepare("SELECT department FROM staff WHERE id = ? AND aap = 2 AND recycle != 1");
-    $stmt->bind_param("i", $staff_id);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    return $row ? aapDeptIdsFromCsv($row['department']) : [];
-}
-
 // Re-queried independently at every entry point rather than cached in
 // session, same convention as OKR's $_is_superadmin / ATEM's
 // $db_is_superadmin.
