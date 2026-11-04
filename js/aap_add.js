@@ -212,7 +212,8 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (templates.length) {
             var tplLinks = templates.map(function (t) {
-                return '<a href="aap_template_download.php?id=' + encodeURIComponent(t.id) + '" target="_blank"><i class="bi bi-file-earmark-arrow-down"></i> ' + escapeHtml(t.file_name) + '</a>';
+                return (t.remark ? '<span style="color:#6c757d;">' + escapeHtml(t.remark) + ':</span> ' : '')
+                    + '<a href="aap_template_download.php?id=' + encodeURIComponent(t.id) + '" target="_blank"><i class="bi bi-file-earmark-arrow-down"></i> ' + escapeHtml(t.file_name) + '</a>';
             });
             lines.push('<strong>Template(s):</strong> ' + tplLinks.join(' &nbsp;|&nbsp; '));
         }
@@ -348,6 +349,10 @@ document.addEventListener('DOMContentLoaded', function () {
         // (the real structural fields) gets relocated/reused below, never
         // cloned, so typeahead bindings etc. survive.
         fieldsContainer.querySelectorAll('[data-extra-point]').forEach(function (el) { el.remove(); });
+        // Same for Attach file inputs added onto a Form Master field's own
+        // wrap below - those wraps can live outside fieldsContainer (Bank
+        // Detail), hence a document-wide lookup.
+        document.querySelectorAll('[data-matched-attach]').forEach(function (el) { el.remove(); });
 
         // Bank Detail's two movable fields always start back home before
         // this call decides whether to pull them into Case Details -
@@ -400,7 +405,19 @@ document.addEventListener('DOMContentLoaded', function () {
                 setFieldState(realKey, true, true, p.label);
                 setFieldValue(realKey, p.value);
                 var wrapEl = document.getElementById(WRAP_IDS[key]);
-                if (wrapEl) fieldsContainer.appendChild(wrapEl);
+                if (wrapEl) {
+                    fieldsContainer.appendChild(wrapEl);
+                    // "Attach" on a Form Master point - same extra_attachment[]
+                    // input buildExtraFieldWrap() gives an extra point, just
+                    // appended to the real field's own wrap.
+                    if (p.requires_attachment) {
+                        var attachEl = document.createElement('div');
+                        attachEl.setAttribute('data-matched-attach', '1');
+                        attachEl.style.marginTop = '4px';
+                        attachEl.innerHTML = '<input class="alpro-input" type="file" name="extra_attachment[' + escapeHtml(p.key.replace(/\./g, '_')) + ']" required>';
+                        wrapEl.appendChild(attachEl);
+                    }
+                }
             } else {
                 var extraWrap = buildExtraFieldWrap(p);
                 extraWrap.setAttribute('data-extra-point', '1');

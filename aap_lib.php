@@ -623,7 +623,7 @@ function aapLogAudit($conn, $case_id, $event, $actor_id, $summary, $changes = nu
 
 // Additional notes added after case creation - separate from the original
 // aap_cases.evidence_note captured at raise time. Shares its storage table
-// (aap_case_evidence_notes, `type`='note') with the reference-link functions
+// (aap_case_evidence, `type`='note') with the reference-link functions
 // below - both are the same shape of data (case_id, author, timestamp, plus
 // content) and are always rendered together under the same "Add New
 // Evidence" panel on aap_update.php, so there was no reason to keep them as
@@ -631,7 +631,7 @@ function aapLogAudit($conn, $case_id, $event, $actor_id, $summary, $changes = nu
 function aapFetchCaseNotes($conn, $case_id) {
     $stmt = $conn->prepare("
         SELECT n.*, s.nama_staff AS created_by_name
-        FROM aap_case_evidence_notes n
+        FROM aap_case_evidence n
         LEFT JOIN staff s ON s.id = n.created_by
         WHERE n.case_id = ? AND n.type = 'note'
         ORDER BY n.timestamp ASC
@@ -645,14 +645,14 @@ function aapFetchCaseNotes($conn, $case_id) {
 
 function aapAddCaseNote($conn, $case_id, $note, $created_by) {
     $now = date('Y-m-d H:i:s');
-    $stmt = $conn->prepare("INSERT INTO aap_case_evidence_notes (case_id, type, note, created_by, timestamp) VALUES (?, 'note', ?, ?, ?)");
+    $stmt = $conn->prepare("INSERT INTO aap_case_evidence (case_id, type, note, created_by, timestamp) VALUES (?, 'note', ?, ?, ?)");
     $stmt->bind_param("isis", $case_id, $note, $created_by, $now);
     $stmt->execute();
     $stmt->close();
 }
 
 function aapFetchCaseNote($conn, $note_id, $case_id) {
-    $stmt = $conn->prepare("SELECT * FROM aap_case_evidence_notes WHERE id = ? AND case_id = ? AND type = 'note'");
+    $stmt = $conn->prepare("SELECT * FROM aap_case_evidence WHERE id = ? AND case_id = ? AND type = 'note'");
     $stmt->bind_param("ii", $note_id, $case_id);
     $stmt->execute();
     $row = $stmt->get_result()->fetch_assoc();
@@ -661,14 +661,14 @@ function aapFetchCaseNote($conn, $note_id, $case_id) {
 }
 
 function aapUpdateCaseNote($conn, $note_id, $case_id, $note) {
-    $stmt = $conn->prepare("UPDATE aap_case_evidence_notes SET note = ? WHERE id = ? AND case_id = ? AND type = 'note'");
+    $stmt = $conn->prepare("UPDATE aap_case_evidence SET note = ? WHERE id = ? AND case_id = ? AND type = 'note'");
     $stmt->bind_param("sii", $note, $note_id, $case_id);
     $stmt->execute();
     $stmt->close();
 }
 
 function aapDeleteCaseNote($conn, $note_id, $case_id) {
-    $stmt = $conn->prepare("DELETE FROM aap_case_evidence_notes WHERE id = ? AND case_id = ? AND type = 'note'");
+    $stmt = $conn->prepare("DELETE FROM aap_case_evidence WHERE id = ? AND case_id = ? AND type = 'note'");
     $stmt->bind_param("ii", $note_id, $case_id);
     $stmt->execute();
     $stmt->close();
@@ -679,12 +679,12 @@ function aapDeleteCaseNote($conn, $note_id, $case_id) {
 // ticket, or resource, when a file upload or note isn't the right fit.
 // Subject to the same evidence-freeze rule as notes/attachments
 // (aapCaseEvidenceItemEditable()) - see aap_update.php's 'add_evidence'/
-// 'delete_reference_link' actions. Shares aap_case_evidence_notes with
+// 'delete_reference_link' actions. Shares aap_case_evidence with
 // the note functions above (`type`='link') - see the comment there.
 function aapFetchCaseReferenceLinks($conn, $case_id) {
     $stmt = $conn->prepare("
         SELECT l.*, s.nama_staff AS created_by_name
-        FROM aap_case_evidence_notes l
+        FROM aap_case_evidence l
         LEFT JOIN staff s ON s.id = l.created_by
         WHERE l.case_id = ? AND l.type = 'link'
         ORDER BY l.timestamp ASC
@@ -698,14 +698,14 @@ function aapFetchCaseReferenceLinks($conn, $case_id) {
 
 function aapAddCaseReferenceLink($conn, $case_id, $url, $label, $created_by) {
     $now = date('Y-m-d H:i:s');
-    $stmt = $conn->prepare("INSERT INTO aap_case_evidence_notes (case_id, type, url, label, created_by, timestamp) VALUES (?, 'link', ?, ?, ?, ?)");
+    $stmt = $conn->prepare("INSERT INTO aap_case_evidence (case_id, type, url, label, created_by, timestamp) VALUES (?, 'link', ?, ?, ?, ?)");
     $stmt->bind_param("issis", $case_id, $url, $label, $created_by, $now);
     $stmt->execute();
     $stmt->close();
 }
 
 function aapFetchCaseReferenceLink($conn, $link_id, $case_id) {
-    $stmt = $conn->prepare("SELECT * FROM aap_case_evidence_notes WHERE id = ? AND case_id = ? AND type = 'link'");
+    $stmt = $conn->prepare("SELECT * FROM aap_case_evidence WHERE id = ? AND case_id = ? AND type = 'link'");
     $stmt->bind_param("ii", $link_id, $case_id);
     $stmt->execute();
     $row = $stmt->get_result()->fetch_assoc();
@@ -714,8 +714,57 @@ function aapFetchCaseReferenceLink($conn, $link_id, $case_id) {
 }
 
 function aapDeleteCaseReferenceLink($conn, $link_id, $case_id) {
-    $stmt = $conn->prepare("DELETE FROM aap_case_evidence_notes WHERE id = ? AND case_id = ? AND type = 'link'");
+    $stmt = $conn->prepare("DELETE FROM aap_case_evidence WHERE id = ? AND case_id = ? AND type = 'link'");
     $stmt->bind_param("ii", $link_id, $case_id);
+    $stmt->execute();
+    $stmt->close();
+}
+
+// Evidence files - third `type` ('file') sharing aap_case_evidence with the
+// notes/links above (merged from the former aap_case_attachments, see
+// sql/2026-10-28_merge_case_attachments_into_evidence.sql). `stored_name` is
+// the NAS path; the file itself never stays on local disk. Execution-only
+// files are NOT here - they keep their own table, see
+// aapUploadExecutionAttachments().
+function aapFetchCaseAttachments($conn, $case_id) {
+    $stmt = $conn->prepare("
+        SELECT a.*, s.nama_staff AS created_by_name,
+               t.remark AS template_remark, t.file_name AS template_file_name
+        FROM aap_case_evidence a
+        LEFT JOIN staff s ON s.id = a.created_by
+        LEFT JOIN aap_case_type_templates t ON t.id = a.template_id
+        WHERE a.case_id = ? AND a.type = 'file'
+        ORDER BY a.timestamp ASC
+    ");
+    $stmt->bind_param("i", $case_id);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    return $rows;
+}
+
+// $point_key ('5', '4.1') links the file to the Instruction point whose
+// "Attach" input it came through; $template_id to the Case Type template
+// whose upload slot it came from - both null for general evidence.
+function aapAddCaseAttachment($conn, $case_id, $file_name, $stored_name, $created_by, $now, $point_key = null, $template_id = null) {
+    $stmt = $conn->prepare("INSERT INTO aap_case_evidence (case_id, type, file_name, stored_name, point_key, template_id, created_by, timestamp) VALUES (?, 'file', ?, ?, ?, ?, ?, ?)");
+    $stmt->bind_param("isssiis", $case_id, $file_name, $stored_name, $point_key, $template_id, $created_by, $now);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function aapFetchCaseAttachment($conn, $att_id, $case_id) {
+    $stmt = $conn->prepare("SELECT * FROM aap_case_evidence WHERE id = ? AND case_id = ? AND type = 'file'");
+    $stmt->bind_param("ii", $att_id, $case_id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row;
+}
+
+function aapDeleteCaseAttachment($conn, $att_id, $case_id) {
+    $stmt = $conn->prepare("DELETE FROM aap_case_evidence WHERE id = ? AND case_id = ? AND type = 'file'");
+    $stmt->bind_param("ii", $att_id, $case_id);
     $stmt->execute();
     $stmt->close();
 }
@@ -1313,7 +1362,12 @@ function aapCaseTypeInstructionPoints($ct) {
 // points are extra, unmatched fields" (filter where matched_field_key is
 // null) - everywhere a Case Type's Instruction for User list needs to
 // drive the UI, it goes through this one function.
-function aapCaseTypeFieldOrder($ct) {
+// $form_master_config (aapFetchFormMasterConfig()): when given, a matched
+// point's `label` becomes Form Master's own (possibly renamed) label, so
+// renaming e.g. Transaction No -> Invoice No in Form Master shows everywhere
+// without editing every Case Type's list. Matching itself still uses the
+// default label, so the rename never breaks the match.
+function aapCaseTypeFieldOrder($ct, $form_master_config = null) {
     $points = aapCaseTypeInstructionPoints($ct);
     $label_to_key = [];
     foreach (aapFormMasterFieldDefaults() as $key => $def) {
@@ -1321,6 +1375,9 @@ function aapCaseTypeFieldOrder($ct) {
     }
     foreach ($points as &$p) {
         $p['matched_field_key'] = $label_to_key[mb_strtolower($p['label'])] ?? null;
+        if ($p['matched_field_key'] !== null && !empty($form_master_config[$p['matched_field_key']]['label'])) {
+            $p['label'] = $form_master_config[$p['matched_field_key']]['label'];
+        }
     }
     unset($p);
     return $points;
@@ -1386,6 +1443,20 @@ function aapValidateExtraInstructionFields($extra_fields, $posted, $attachment_p
         }
         if ($attachment_present !== null && !empty($f['requires_attachment']) && empty($attachment_present[$f['key']])) {
             return "Please attach a supporting file for " . $f['label'] . ".";
+        }
+    }
+    return null;
+}
+
+// Same "Attach" check as aapValidateExtraInstructionFields() above, for
+// points that match a Form Master field (those never go through that
+// function - their answer lives in its own aap_cases column). $ordered_points
+// is aapCaseTypeFieldOrder()'s output; $attachment_present the same
+// point_key => bool map. Returns an error string or null.
+function aapValidateMatchedPointAttachments($ordered_points, $attachment_present) {
+    foreach ($ordered_points as $p) {
+        if ($p['matched_field_key'] !== null && !empty($p['requires_attachment']) && empty($attachment_present[$p['key']])) {
+            return "Please attach a supporting file for " . $p['label'] . ".";
         }
     }
     return null;
@@ -1687,6 +1758,28 @@ function aapSubmitCaseForApproval($conn, $case_id, $case_type_id, $calculated_va
     }
 }
 
+// Stores $ct's current Instruction for User list on the case
+// (aap_cases.instructions_snapshot) - called when a case is created and when
+// its Case Type changes, so later edits to the Case Type's list never alter
+// an existing case's fields.
+function aapSnapshotCaseInstructions($conn, $case_id, $ct) {
+    $snapshot = $ct['instructions'] ?? null;
+    $stmt = $conn->prepare("UPDATE aap_cases SET instructions_snapshot = ? WHERE id = ?");
+    $stmt->bind_param("si", $snapshot, $case_id);
+    $stmt->execute();
+    $stmt->close();
+}
+
+// $ct with its `instructions` swapped for the case's own snapshot, when the
+// case still has that Case Type and a snapshot exists - pass the result to
+// aapCaseTypeFieldOrder() wherever an EXISTING case's fields are built.
+function aapCaseTypeAsCreated($ct, $case) {
+    if ($ct && $case['instructions_snapshot'] !== null && (int)$ct['id'] === (int)$case['case_type_id']) {
+        $ct['instructions'] = $case['instructions_snapshot'];
+    }
+    return $ct;
+}
+
 // Shared by aap_update.php's 'edit_case' and 'open_case' action handlers -
 // Open Case now submits the same Case Summary form as Save Changes (so the
 // requester isn't forced to save first just to unlock the Open Case button),
@@ -1733,6 +1826,9 @@ function aapSaveCaseEditFields($conn, $id, $case, $post, $now) {
         $now, $id
     );
     $stmt->execute(); $stmt->close();
+    if ($case_type_id !== (int)$case['case_type_id']) {
+        aapSnapshotCaseInstructions($conn, $id, $new_ct);
+    }
 
     return [
         'case_type_id' => $case_type_id,
@@ -1929,7 +2025,9 @@ function aapPhysicalStatusIcon($status) {
 // selected-but-failed file used to look identical to "nothing selected" to
 // the user (both just produced no attachment row), with the audit log and
 // success banner still claiming "Evidence attachment(s) added" either way.
-function aapUploadEvidenceFiles($conn, $case_id, $files, $uploaded_by, $now) {
+// $keyed_by_point: $files is aap_add.php's extra_attachment[] entry, keyed
+// by point_key with '.' mangled to '_' - each file gets that point_key.
+function aapUploadEvidenceFiles($conn, $case_id, $files, $uploaded_by, $now, $keyed_by_point = false) {
     $result = ['attempted' => 0, 'uploaded' => 0];
     if (empty($files) || !is_array($files['name'])) {
         return $result;
@@ -1959,10 +2057,7 @@ function aapUploadEvidenceFiles($conn, $case_id, $files, $uploaded_by, $now) {
             continue;
         }
 
-        $stmt = $conn->prepare("INSERT INTO aap_case_attachments (case_id, file_name, stored_name, uploaded_by, timestamp) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("issis", $case_id, $fname, $nas_path, $uploaded_by, $now);
-        $stmt->execute();
-        $stmt->close();
+        aapAddCaseAttachment($conn, $case_id, $fname, $nas_path, $uploaded_by, $now, $keyed_by_point ? str_replace('_', '.', (string)$i) : null);
         $result['uploaded']++;
     }
     return $result;
@@ -2013,12 +2108,23 @@ function aapUploadCaseTypeTemplates($conn, $case_type_id, $files, $uploaded_by, 
 }
 
 function aapFetchCaseTypeTemplates($conn, $case_type_id) {
-    $stmt = $conn->prepare("SELECT id, file_name, timestamp FROM aap_case_type_templates WHERE case_type_id = ? ORDER BY id");
+    $stmt = $conn->prepare("SELECT id, file_name, remark, timestamp FROM aap_case_type_templates WHERE case_type_id = ? ORDER BY id");
     $stmt->bind_param("i", $case_type_id);
     $stmt->execute();
     $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
     return $rows;
+}
+
+// Optional admin note shown under a template's file name wherever staff
+// download it (aap_add.php, Fixit's add_report.php). Empty string clears it.
+function aapUpdateCaseTypeTemplateRemark($conn, $template_id, $case_type_id, $remark) {
+    $remark = trim($remark);
+    $remark = $remark === '' ? null : mb_substr($remark, 0, 255);
+    $stmt = $conn->prepare("UPDATE aap_case_type_templates SET remark = ? WHERE id = ? AND case_type_id = ?");
+    $stmt->bind_param("sii", $remark, $template_id, $case_type_id);
+    $stmt->execute();
+    $stmt->close();
 }
 
 function aapDeleteCaseTypeTemplate($conn, $template_id, $case_type_id) {
@@ -2044,10 +2150,10 @@ function aapCaseTypeTemplateUrl($template_id) {
 // local disk (e.g. a Fixit report's own attachment, already saved under
 // fixit's own upload folder) rather than a fresh $_FILES entry - copy()s it
 // instead of move_uploaded_file()ing it (which only works on an actual HTTP
-// upload for this request), same NAS push + aap_case_attachments row shape
+// upload for this request), same NAS push + aap_case_evidence 'file' row
 // otherwise. Used by aapCreateCaseFromFixitRequiredInfo() below to carry a
 // Fixit report's attachments over as the auto-created case's own evidence.
-function aapAttachExistingFileAsEvidence($conn, $case_id, $local_path, $display_name, $uploaded_by, $now) {
+function aapAttachExistingFileAsEvidence($conn, $case_id, $local_path, $display_name, $uploaded_by, $now, $point_key = null, $template_id = null) {
     if (!is_file($local_path)) return false;
     $tmp_dir = __DIR__ . '/uploads/tmp/';
     if (!is_dir($tmp_dir)) {
@@ -2063,10 +2169,7 @@ function aapAttachExistingFileAsEvidence($conn, $case_id, $local_path, $display_
     unlink($tmp_path);
     if ($nas_path === false) return false;
 
-    $stmt = $conn->prepare("INSERT INTO aap_case_attachments (case_id, file_name, stored_name, uploaded_by, timestamp) VALUES (?, ?, ?, ?, ?)");
-    $stmt->bind_param("issis", $case_id, $display_name, $nas_path, $uploaded_by, $now);
-    $stmt->execute();
-    $stmt->close();
+    aapAddCaseAttachment($conn, $case_id, $display_name, $nas_path, $uploaded_by, $now, $point_key, $template_id);
     return true;
 }
 
@@ -2094,12 +2197,18 @@ function aapAttachExistingFileAsEvidence($conn, $case_id, $local_path, $display_
 // Notes/Link rows - saved directly into this case's own AAP tables below,
 // with no Fixit-side copy (that box only shows for a category that
 // auto-creates its case here in the same submit).
-function aapCreateCaseFromFixitRequiredInfo($conn, $fixit_record_id, $case_type_id, $requester_staff_id, $requester_department_id, $now, $evidence_notes = [], $reference_links = []) {
+// $point_attachment_ids maps fixit_attachment.id => the Required Information
+// field index its "Attach" file was uploaded under (fixit/ajax.php's
+// custom_attachment[$field_index]) - same position-zip as $fixit_answers,
+// so that index is also the point's position in aapCaseTypeFieldOrder().
+// $template_attachment_ids maps fixit_attachment.id => the
+// aap_case_type_templates.id whose Files row it was uploaded in.
+function aapCreateCaseFromFixitRequiredInfo($conn, $fixit_record_id, $case_type_id, $requester_staff_id, $requester_department_id, $now, $evidence_notes = [], $reference_links = [], $point_attachment_ids = [], $template_attachment_ids = []) {
     $ct = aapFetchCaseType($conn, $case_type_id);
     if (!$ct || (int)$ct['recycle'] === 1) return null;
 
-    $ordered_points = aapCaseTypeFieldOrder($ct);
     $form_master_config = aapFetchFormMasterConfig($conn);
+    $ordered_points = aapCaseTypeFieldOrder($ct, $form_master_config);
     $field_cfg = aapCaseTypeReplaceFieldConfig($form_master_config, $ordered_points);
 
     $fixit_answers = aapFetchFixitCustomFieldAnswers($conn, $fixit_record_id);
@@ -2157,7 +2266,7 @@ function aapCreateCaseFromFixitRequiredInfo($conn, $fixit_record_id, $case_type_
     $requester_type = 'customer';
     $requesting_channel = '';
     // Same split AAP itself uses: the first note is the case's original
-    // aap_cases.evidence_note, any further ones become aap_case_evidence_notes rows (type 'note')
+    // aap_cases.evidence_note, any further ones become aap_case_evidence rows (type 'note')
     // (inserted after the case row exists, below).
     $evidence_notes = array_values(array_filter(array_map('trim', (array)$evidence_notes), function ($n) { return $n !== ''; }));
     $evidence_note = $evidence_notes[0] ?? '';
@@ -2190,16 +2299,23 @@ function aapCreateCaseFromFixitRequiredInfo($conn, $fixit_record_id, $case_type_
 
     $case_ref = aapGenerateCaseRef($new_id);
     $conn->query("UPDATE aap_cases SET case_ref = '" . $conn->real_escape_string($case_ref) . "' WHERE id = " . $new_id);
+    aapSnapshotCaseInstructions($conn, $new_id, $ct);
 
     aapSaveCaseInstructionAnswers($conn, $new_id, $extra_fields, $extra_posted);
 
     // Carry the Fixit report's own attachments over as this case's evidence.
-    $att_res = $conn->query("SELECT name, path FROM fixit_attachment WHERE fixit_record_id = " . (int)$fixit_record_id);
+    // Only trust a posted template id that really belongs to this Case Type.
+    $valid_template_ids = array_map('intval', array_column(aapFetchCaseTypeTemplates($conn, $case_type_id), 'id'));
+    $att_res = $conn->query("SELECT id, name, path FROM fixit_attachment WHERE fixit_record_id = " . (int)$fixit_record_id);
     while ($att_res && $att_row = $att_res->fetch_assoc()) {
         // fixit/add_report.php saves uploads under this fixed local folder
         // ($uploadDir2 there) - `path` is just the stored filename.
         $local_path = 'C:/webroot/fixit/' . $att_row['path'];
-        aapAttachExistingFileAsEvidence($conn, $new_id, $local_path, $att_row['name'], $requester_staff_id, $now);
+        $field_index = $point_attachment_ids[(int)$att_row['id']] ?? null;
+        $point_key = ($field_index !== null) ? ($ordered_points[$field_index]['key'] ?? null) : null;
+        $template_id = $template_attachment_ids[(int)$att_row['id']] ?? null;
+        if ($template_id !== null && !in_array((int)$template_id, $valid_template_ids, true)) $template_id = null;
+        aapAttachExistingFileAsEvidence($conn, $new_id, $local_path, $att_row['name'], $requester_staff_id, $now, $point_key, $template_id);
     }
 
     // Second and later Fixit notes -> this case's additional notes.
@@ -2208,7 +2324,7 @@ function aapCreateCaseFromFixitRequiredInfo($conn, $fixit_record_id, $case_type_
     }
 
     // The Fixit report's own Reference Link(s) -> this case's reference links.
-    $link_stmt = $conn->prepare("INSERT INTO aap_case_evidence_notes (case_id, type, url, label, created_by, timestamp) VALUES (?, 'link', ?, ?, ?, ?)");
+    $link_stmt = $conn->prepare("INSERT INTO aap_case_evidence (case_id, type, url, label, created_by, timestamp) VALUES (?, 'link', ?, ?, ?, ?)");
     foreach ((array)$reference_links as $link) {
         $link_url = trim((string)($link['url'] ?? ''));
         if ($link_url === '') continue;
@@ -2228,7 +2344,7 @@ function aapCreateCaseFromFixitRequiredInfo($conn, $fixit_record_id, $case_type_
 }
 
 // Execution-only attachments (aap_case_execution_attachments) - kept as a
-// separate table from aap_case_attachments (rather than a visibility flag on
+// separate table from aap_case_evidence's 'file' rows (rather than a visibility flag on
 // the same one) so a query that forgets to filter by visibility can never
 // accidentally leak these to everyone else. Only shown/uploadable/
 // downloadable to whoever can execute the case ($can_execute in
@@ -2341,7 +2457,7 @@ function aapCaseExportCsvRow($conn, $row) {
     }
 
     $attach_parts = [];
-    $att_stmt = $conn->prepare("SELECT file_name FROM aap_case_attachments WHERE case_id = ? ORDER BY timestamp ASC");
+    $att_stmt = $conn->prepare("SELECT file_name FROM aap_case_evidence WHERE case_id = ? AND type = 'file' ORDER BY timestamp ASC");
     $att_stmt->bind_param("i", $row['id']);
     $att_stmt->execute();
     $att_res = $att_stmt->get_result();

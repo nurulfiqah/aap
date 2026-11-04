@@ -1,4 +1,4 @@
-<?php
+te<?php
 // A page may set $page_js before including this footer to load a
 // page-specific script from js/ - mirrors okr/footer.php's $page_js.
 // Must print BEFORE the include below: common/index_adv.php's $connect=0

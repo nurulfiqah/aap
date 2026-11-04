@@ -340,8 +340,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 '<input type="checkbox" class="aap-instr-required" ' + (checked ? 'checked' : '') + ' ' + (readonly ? 'disabled' : '') + '> Req</label>';
         }
 
-        // Only meaningful for a point that ends up NOT matching a Form
-        // Master field, same as requiredCheckboxHtml() above.
+        // Unlike Type/Req, shown on Form Master rows too - a supporting
+        // file (e.g. IC photo for Customer Name) is independent of which
+        // input the point's own answer uses.
         function requiresAttachmentCheckboxHtml(checked) {
             return '<label style="display:flex; align-items:center; gap:3px; font-size:11px; white-space:nowrap; cursor:pointer;" title="Requires a supporting file/photo">' +
                 '<input type="checkbox" class="aap-instr-requires-attachment" ' + (checked ? 'checked' : '') + ' ' + (readonly ? 'disabled' : '') + '> Attach</label>';
@@ -377,6 +378,37 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         }
 
+        // A Form Master row gets no renderPointExtras() (no Type/Options/
+        // Req), so its Attach checkbox is wired up here on its own.
+        function wireMatchedAttach(point, rowEl) {
+            var cb = rowEl.querySelector('.aap-instr-requires-attachment');
+            if (cb && !readonly) {
+                cb.addEventListener('change', function (e) { point.requires_attachment = e.target.checked; });
+            }
+        }
+
+        // ▲/▼ reorder buttons for a main or sub point - disabled at the
+        // ends of its own list. Numbering is positional, so moving a point
+        // renumbers it (and everything it swaps with) on the next render().
+        function moveBtnsHtml(index, count, small) {
+            var pad = small ? '2px 6px' : '3px 7px';
+            return '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-move-up" title="Move up" style="padding:' + pad + '; font-size:11px;"' + (index === 0 ? ' disabled' : '') + '>&#9650;</button>' +
+                '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-move-down" title="Move down" style="padding:' + pad + '; font-size:11px;"' + (index === count - 1 ? ' disabled' : '') + '>&#9660;</button>';
+        }
+
+        function wireMoveBtns(rowEl, list, index) {
+            function move(delta) {
+                var target = index + delta;
+                if (target < 0 || target >= list.length) return;
+                var tmp = list[index];
+                list[index] = list[target];
+                list[target] = tmp;
+                render();
+            }
+            rowEl.querySelector('.aap-instr-move-up').addEventListener('click', function () { move(-1); });
+            rowEl.querySelector('.aap-instr-move-down').addEventListener('click', function () { move(1); });
+        }
+
         function render() {
             container.innerHTML = '';
             if (!data.length) {
@@ -386,9 +418,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 var mainMatched = isFormMasterMatch(main.text);
                 var mainRow = row(
                     '<div style="display:flex; gap:8px; align-items:center; margin-top:' + (mi === 0 ? '0' : '10px') + ';">' +
+                    (readonly ? '' : '<span style="display:flex; gap:2px;">' + moveBtnsHtml(mi, data.length, false) + '</span>') +
                     '<span style="font-weight:600; font-size:12px; min-width:28px;">' + (mi + 1) + '.</span>' +
                     '<input type="text" class="alpro-input" placeholder="Main point" value="' + esc(main.text) + '" style="flex:1; height:32px; padding:4px 8px; font-size:13px;" ' + (readonly ? 'disabled' : '') + '>' +
-                    (mainMatched ? '' : typeSelectHtml(main.type) + requiredCheckboxHtml(main.required) + requiresAttachmentCheckboxHtml(main.requires_attachment)) +
+                    (mainMatched ? '' : typeSelectHtml(main.type) + requiredCheckboxHtml(main.required)) + requiresAttachmentCheckboxHtml(main.requires_attachment) +
                     (readonly ? '' :
                         '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-add-sub" style="padding:3px 8px; font-size:11px; white-space:nowrap;">+ Sub</button>' +
                         '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-remove-main" style="padding:3px 8px; font-size:11px;">&times;</button>') +
@@ -397,9 +430,11 @@ document.addEventListener('DOMContentLoaded', function () {
                 container.appendChild(mainRow);
                 mainRow.querySelector('input[type="text"]').addEventListener('input', function (e) { main.text = e.target.value; });
                 if (!mainMatched) renderPointExtras(main, mainRow, render);
+                else wireMatchedAttach(main, mainRow);
                 if (!readonly) {
                     mainRow.querySelector('.aap-instr-add-sub').addEventListener('click', function () { main.subs.push(normalizePoint('')); render(); });
                     mainRow.querySelector('.aap-instr-remove-main').addEventListener('click', function () { data.splice(mi, 1); render(); });
+                    wireMoveBtns(mainRow, data, mi);
                 }
 
                 if (main.subs.length) {
@@ -408,17 +443,20 @@ document.addEventListener('DOMContentLoaded', function () {
                         var subMatched = isFormMasterMatch(sub.text);
                         var subRow = row(
                             '<div style="display:flex; gap:8px; align-items:center; margin-top:4px;">' +
+                            (readonly ? '' : '<span style="display:flex; gap:2px;">' + moveBtnsHtml(si, main.subs.length, true) + '</span>') +
                             '<span style="font-size:12px; color:#6c757d; min-width:36px;">' + (mi + 1) + '.' + (si + 1) + '</span>' +
                             '<input type="text" class="alpro-input" placeholder="Sub point" value="' + esc(sub.text) + '" style="flex:1; height:30px; padding:4px 8px; font-size:12px;" ' + (readonly ? 'disabled' : '') + '>' +
-                            (subMatched ? '' : typeSelectHtml(sub.type) + requiredCheckboxHtml(sub.required) + requiresAttachmentCheckboxHtml(sub.requires_attachment)) +
+                            (subMatched ? '' : typeSelectHtml(sub.type) + requiredCheckboxHtml(sub.required)) + requiresAttachmentCheckboxHtml(sub.requires_attachment) +
                             (readonly ? '' : '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-remove-sub" style="padding:2px 7px; font-size:11px;">&times;</button>') +
                             '</div>'
                         );
                         subsWrap.appendChild(subRow);
                         subRow.querySelector('input[type="text"]').addEventListener('input', function (e) { main.subs[si].text = e.target.value; });
                         if (!subMatched) renderPointExtras(sub, subRow, render);
+                        else wireMatchedAttach(sub, subRow);
                         if (!readonly) {
                             subRow.querySelector('.aap-instr-remove-sub').addEventListener('click', function () { main.subs.splice(si, 1); render(); });
+                            wireMoveBtns(subRow, main.subs, si);
                         }
                     });
                     container.appendChild(subsWrap);

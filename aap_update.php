@@ -57,11 +57,7 @@ $can_execute = aapCanExecute($conn, $id_user, $case['case_type_id'], $case['appr
 // ---- File download (evidence attachment) ----
 if (isset($_GET['download'])) {
     $att_id = (int)$_GET['download'];
-    $stmt = $conn->prepare("SELECT * FROM aap_case_attachments WHERE id = ? AND case_id = ?");
-    $stmt->bind_param("ii", $att_id, $id);
-    $stmt->execute();
-    $att = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
+    $att = aapFetchCaseAttachment($conn, $att_id, $id);
     if ($att) {
         $content = corpNasConnect()->download($att['stored_name']);
         if ($content !== false) {
@@ -209,7 +205,9 @@ $original_note_editable = aapCaseEvidenceItemEditable((int)$case['created_by'], 
 // just doesn't dynamically re-render the on-page field set.
 $form_master_config = aapFetchFormMasterConfig($conn);
 $current_ct = aapFetchCaseType($conn, $case['case_type_id']);
-$ordered_points = $current_ct ? aapCaseTypeFieldOrder($current_ct) : [];
+// Built from the list as it was when this case was created (its own
+// snapshot), not the Case Type's live list - see aapCaseTypeAsCreated().
+$ordered_points = $current_ct ? aapCaseTypeFieldOrder(aapCaseTypeAsCreated($current_ct, $case), $form_master_config) : [];
 $field_cfg = aapCaseTypeReplaceFieldConfig($form_master_config, $ordered_points);
 $instruction_answers_by_key = [];
 foreach (aapFetchCaseInstructionAnswers($conn, $id) as $ia) {
@@ -282,7 +280,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     // translation matches js/aap_add.js's applyCaseDetailsLayout()/
     // aap_add.php's own $instruction_answers_posted.
     $submitted_ct = aapFetchCaseType($conn, (int)($_POST['case_type_id'] ?? $case['case_type_id']));
-    $submitted_ordered_points = $submitted_ct ? aapCaseTypeFieldOrder($submitted_ct) : [];
+    $submitted_ordered_points = $submitted_ct ? aapCaseTypeFieldOrder(aapCaseTypeAsCreated($submitted_ct, $case), $form_master_config) : [];
     $submitted_extra_fields = array_values(array_filter($submitted_ordered_points, function ($p) { return $p['matched_field_key'] === null; }));
     $submitted_instruction_answers = [];
     foreach ($_POST['instruction_answer'] ?? [] as $k => $v) {
@@ -651,20 +649,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
     } elseif ($action === 'delete_attachment' && $can_add_evidence) {
         $att_id = (int)($_POST['attachment_id'] ?? 0);
-        $stmt = $conn->prepare("SELECT * FROM aap_case_attachments WHERE id = ? AND case_id = ?");
-        $stmt->bind_param("ii", $att_id, $id);
-        $stmt->execute();
-        $att = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
+        $att = aapFetchCaseAttachment($conn, $att_id, $id);
         if (!$att) {
             $msg = "Attachment not found."; $msg_type = "alpro-danger";
-        } elseif (!aapCaseEvidenceItemEditable($att['uploaded_by'], $att['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
+        } elseif (!aapCaseEvidenceItemEditable($att['created_by'], $att['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
             $msg = "This attachment can no longer be removed."; $msg_type = "alpro-danger";
         } else {
             corpNasConnect()->delete($att['stored_name']);
-            $dstmt = $conn->prepare("DELETE FROM aap_case_attachments WHERE id = ?");
-            $dstmt->bind_param("i", $att_id);
-            $dstmt->execute(); $dstmt->close();
+            aapDeleteCaseAttachment($conn, $att_id, $id);
             aapLogAudit($conn, $id, 'attachment_removed', $id_user, "Removed attachment: " . $att['file_name']);
             $msg = "Attachment removed."; $msg_type = "alpro-success";
         }
@@ -835,13 +827,20 @@ if (in_array($case['case_status'], ['rejected', 'voided'], true)) {
 }
 $aap_steps[] = ['label' => 'Closed', 'sub' => '', 'state' => $cstate];
 
+// Files uploaded through an Instruction point's own "Attach" input show next
+// to that point in Case Summary only, not in the Evidence list. If the point
+// no longer exists (admin edited the Case Type's list since), the file falls
+// back to the Evidence list so it never disappears.
 $attachments = [];
-$att_res = $conn->query("SELECT a.*, s.nama_staff AS uploaded_by_name
-                          FROM aap_case_attachments a
-                          LEFT JOIN staff s ON s.id = a.uploaded_by
-                          WHERE a.case_id = " . (int)$id . "
-                          ORDER BY a.timestamp ASC");
-while ($att_res && $row = $att_res->fetch_assoc()) $attachments[] = $row;
+$attachments_by_point = [];
+$current_point_keys = array_column($ordered_points, 'key');
+foreach (aapFetchCaseAttachments($conn, $id) as $a) {
+    if ($a['point_key'] !== null && in_array($a['point_key'], $current_point_keys, true)) {
+        $attachments_by_point[$a['point_key']][] = $a;
+    } else {
+        $attachments[] = $a;
+    }
+}
 
 // Execution-only attachments - only ever queried/rendered when the viewer
 // can execute (see aap_lib.php's aapUploadExecutionAttachments comment) so
@@ -1029,7 +1028,18 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         <div class="aap-form-grid">
                             <div class="alpro-field aap-span-3">
                                 <label><?php echo htmlspecialchars($op['label']); ?></label>
+                                <?php if (!empty($attachments_by_point[$op['key']])): ?>
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:start;">
+                                    <div><?php echo htmlspecialchars($op_value); ?></div>
+                                    <div style="display:flex; flex-direction:column; gap:2px; min-width:0;">
+                                        <?php foreach ($attachments_by_point[$op['key']] as $pa): ?>
+                                            <a href="?id=<?php echo $id; ?>&download=<?php echo (int)$pa['id']; ?>" style="font-size:12px; overflow-wrap:anywhere;"><i class="bi bi-paperclip"></i> <?php echo htmlspecialchars($pa['file_name']); ?></a>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </div>
+                                <?php else: ?>
                                 <div><?php echo htmlspecialchars($op_value); ?></div>
+                                <?php endif; ?>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -1332,7 +1342,7 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                     This is only possible before the case reaches a decision at the approval gate — it cannot be undone.
                 </p>
 
-                <button type="button" id="void-case-toggle" class="alpro-btn" style="width:100%; padding:6px 10px; font-size:12px; background:#fff; color:#212529; border:1px solid #000;"><i class="bi bi-x-circle"></i> Reject Case</button>
+                <button type="button" id="void-case-toggle" class="alpro-btn aap-btn-action aap-btn-action-danger" style="width:100%;"><i class="bi bi-x-circle"></i> Reject Case</button>
 
                 <form method="post" action="" id="void-case-form" style="display:none;" onsubmit="return confirm('Reject this case? This cannot be undone.');">
                     <input type="hidden" name="action" value="void_case">
@@ -1604,11 +1614,19 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         <?php if (!empty($attachments)): ?>
                         <ul class="aap-attach-list">
                             <?php foreach ($attachments as $att): ?>
-                                <?php $att_editable = aapCaseEvidenceItemEditable($att['uploaded_by'], $att['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at); ?>
+                                <?php $att_editable = aapCaseEvidenceItemEditable($att['created_by'], $att['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at); ?>
                                 <li>
-                                    <a href="?id=<?php echo $id; ?>&download=<?php echo $att['id']; ?>"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($att['file_name']); ?></a>
+                                    <div style="min-width:0;">
+                                        <?php // Uploaded in a template's own slot - label it with that
+                                        // template's remark (or its file name if it has none).
+                                        $att_tpl_label = $att['template_remark'] ?: ($att['template_file_name'] ? 'Template: ' . $att['template_file_name'] : '');
+                                        if ($att_tpl_label !== ''): ?>
+                                            <div style="font-size:12px; color:#6c757d; line-height:1.2;"><?php echo htmlspecialchars($att_tpl_label); ?></div>
+                                        <?php endif; ?>
+                                        <a href="?id=<?php echo $id; ?>&download=<?php echo $att['id']; ?>"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($att['file_name']); ?></a>
+                                    </div>
                                     <span style="display:flex; align-items:center; gap:8px;">
-                                        <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($att['uploaded_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($att['timestamp'])); ?></span>
+                                        <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($att['created_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($att['timestamp'])); ?></span>
                                         <?php if ($att_editable): ?>
                                             <form method="post" action="" class="attachment-delete-form" style="display:inline;" onsubmit="return aapConfirmDeleteAttachment();">
                                                 <input type="hidden" name="action" value="delete_attachment">
@@ -1664,6 +1682,22 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                     </div>
                     <div class="alpro-field">
                         <label>Add More Evidence</label>
+                        <?php // Case Type's reference template(s) - same remark-above-file
+                        // layout as Fixit's Files rows, so staff adding evidence later
+                        // can still grab the form to fill in.
+                        $case_type_templates = aapFetchCaseTypeTemplates($conn, $case['case_type_id']);
+                        if (!empty($case_type_templates)): ?>
+                        <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
+                            <?php foreach ($case_type_templates as $tpl): ?>
+                                <div>
+                                    <?php if (!empty($tpl['remark'])): ?>
+                                        <div style="font-size:12px; color:#6c757d; line-height:1.2;"><?php echo htmlspecialchars($tpl['remark']); ?></div>
+                                    <?php endif; ?>
+                                    <a href="<?php echo htmlspecialchars(aapCaseTypeTemplateUrl($tpl['id'])); ?>" target="_blank" style="font-size:13px;"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($tpl['file_name']); ?></a>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php endif; ?>
                         <input class="alpro-input" type="file" name="evidence[]" id="evidence-file-input" multiple>
                         <ul class="aap-attach-list" id="evidence-file-preview" style="margin-top:8px;"></ul>
                     </div>

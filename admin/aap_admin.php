@@ -414,6 +414,9 @@ if (isset($_POST['save_case_type'])) {
                 // confirm, etc.), since these are part of what the Case Type
                 // itself hands to whoever raises a case under it.
                 if ($rights['can_edit_level1']) {
+                    foreach ((array)($_POST['ct_template_remarks'] ?? []) as $tpl_id => $tpl_remark) {
+                        aapUpdateCaseTypeTemplateRemark($conn, (int)$tpl_id, $target_ctid, (string)$tpl_remark);
+                    }
                     foreach ((array)($_POST['ct_remove_templates'] ?? []) as $remove_id) {
                         aapDeleteCaseTypeTemplate($conn, (int)$remove_id, $target_ctid);
                     }
@@ -643,8 +646,8 @@ $aap_base = '../';
                         <tr><th>Field</th><th style="width:90px;">Add</th></tr>
                         <?php foreach (aapFormMasterFieldDefaults() as $fm_key => $fm_def): ?>
                             <tr>
-                                <td><?php echo htmlspecialchars($fm_def['label']); ?></td>
-                                <td align="center"><input type="checkbox" class="ct-instr-field-toggle" data-field-label="<?php echo htmlspecialchars($fm_def['label']); ?>" <?php echo isset($fm_instr_groups[$fm_key]) ? 'data-group="' . htmlspecialchars($fm_instr_groups[$fm_key]) . '"' : ''; ?>></td>
+                                <td style="font-size:13px; padding-top:6px; padding-bottom:6px;"><?php echo htmlspecialchars($fm_def['label']); ?></td>
+                                <td align="center" style="padding-top:6px; padding-bottom:6px;"><input type="checkbox" class="ct-instr-field-toggle" data-field-label="<?php echo htmlspecialchars($fm_def['label']); ?>" <?php echo isset($fm_instr_groups[$fm_key]) ? 'data-group="' . htmlspecialchars($fm_instr_groups[$fm_key]) . '"' : ''; ?>></td>
                             </tr>
                         <?php endforeach; ?>
                     </table>
@@ -673,10 +676,15 @@ $aap_base = '../';
                     <?php if (!empty($edit_case_type_templates)): ?>
                     <ul class="aap-attach-list" style="margin-bottom:10px;">
                         <?php foreach ($edit_case_type_templates as $tpl): ?>
-                            <li>
-                                <a href="<?php echo htmlspecialchars(aapCaseTypeTemplateUrl($tpl['id'])); ?>" target="_blank"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($tpl['file_name']); ?></a>
+                            <li style="justify-content:flex-start;">
                                 <?php if ($edit_rights['can_edit_level1']): ?>
-                                    <label style="margin-left:10px; font-weight:normal; font-size:12px;"><input type="checkbox" name="ct_remove_templates[]" value="<?php echo (int)$tpl['id']; ?>"> Remove</label>
+                                    <input class="alpro-input" type="text" name="ct_template_remarks[<?php echo (int)$tpl['id']; ?>]" value="<?php echo htmlspecialchars($tpl['remark'] ?? ''); ?>" maxlength="255" placeholder="Remark (optional)" style="flex:1; min-width:0; margin:0;">
+                                <?php elseif (!empty($tpl['remark'])): ?>
+                                    <span style="flex:1; min-width:0; font-size:12px; color:#6c757d;"><?php echo htmlspecialchars($tpl['remark']); ?></span>
+                                <?php endif; ?>
+                                <a href="<?php echo htmlspecialchars(aapCaseTypeTemplateUrl($tpl['id'])); ?>" target="_blank" style="white-space:nowrap;"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($tpl['file_name']); ?></a>
+                                <?php if ($edit_rights['can_edit_level1']): ?>
+                                    <label style="font-weight:normal; font-size:12px; white-space:nowrap; margin:0;"><input type="checkbox" name="ct_remove_templates[]" value="<?php echo (int)$tpl['id']; ?>"> Remove</label>
                                 <?php endif; ?>
                             </li>
                         <?php endforeach; ?>
@@ -685,6 +693,7 @@ $aap_base = '../';
 
                     <?php if ($edit_rights['can_edit_level1']): ?>
                         <input class="alpro-input" type="file" name="ct_templates[]" multiple>
+                        <div style="font-size:12px; color:#6c757d; margin-top:4px;">A remark box appears next to each file once it's uploaded (Save, then edit again).</div>
                     <?php endif; ?>
                 </div>
             </div>

@@ -318,6 +318,12 @@ CREATE TABLE `aap_cases` (
   `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   `case_ref` VARCHAR(20) NOT NULL,
   `case_type_id` INT UNSIGNED NOT NULL,
+  -- Copy of aap_case_types.instructions taken when the case was created (or
+  -- its Case Type changed) - aap_update.php builds the case's fields from
+  -- this, not the Case Type's live list, so adding/removing/reordering
+  -- points on the Case Type later never changes what an existing case
+  -- shows. See aapCaseTypeAsCreated() in aap_lib.php.
+  `instructions_snapshot` TEXT NULL DEFAULT NULL,
   -- Originating Fixit ticket (fixit_record.id), when this case was raised
   -- via the Fixit handoff / Incoming from Fixit queue. NULL for cases
   -- raised without a Fixit ticket (not possible from the UI anymore, but
@@ -423,23 +429,6 @@ CREATE TABLE `aap_cases` (
   KEY `idx_aap_cases_fixit_record` (`fixit_record_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- --------------------------------------------------------
--- aap_case_attachments
--- Evidence files per case. `stored_name` is the corporate NAS path
--- (see nas_config.php / lib/synologynas.php) — files only ever touch
--- local disk transiently (uploads/tmp/), never stored permanently under
--- uploads/.
--- --------------------------------------------------------
-
-CREATE TABLE `aap_case_attachments` (
-  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `case_id` INT UNSIGNED NOT NULL,
-  `file_name` VARCHAR(255) NOT NULL,
-  `stored_name` VARCHAR(255) NOT NULL,
-  `uploaded_by` INT NOT NULL,
-  `timestamp` DATETIME NOT NULL,
-  KEY `idx_aap_attach_case` (`case_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
 -- aap_case_type_templates
@@ -448,8 +437,9 @@ CREATE TABLE `aap_case_attachments` (
 -- (admin/aap_admin.php's "Template File(s)" field) - not tied to any one
 -- case, lives for as long as the Case Type does. Shown as download link(s)
 -- on aap_add.php (Raise Case) and on Fixit's add_report.php for an
--- AAP-linked category, right next to where evidence is uploaded. Same NAS
--- storage convention as aap_case_attachments above (see
+-- AAP-linked category, right next to where evidence is uploaded. `remark` is
+-- an optional admin note shown under the file name there (e.g. "sign and
+-- stamp page 2"). Same NAS storage convention as aap_case_evidence (see
 -- aapUploadCaseTypeTemplates()/aapFetchCaseTypeTemplates()/
 -- aapDeleteCaseTypeTemplate() in aap_lib.php).
 -- --------------------------------------------------------
@@ -458,6 +448,7 @@ CREATE TABLE `aap_case_type_templates` (
   `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   `case_type_id` INT NOT NULL,
   `file_name` VARCHAR(255) NOT NULL,
+  `remark` VARCHAR(255) NULL DEFAULT NULL,
   `stored_name` VARCHAR(255) NOT NULL,
   `uploaded_by` INT NOT NULL,
   `timestamp` DATETIME NOT NULL,
@@ -542,30 +533,46 @@ CREATE TABLE `aap_admin_audit_logs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
--- aap_case_evidence_notes
--- Additional notes AND named URL references added after case creation (via
--- the "Add New Evidence" panel on aap_update.php, alongside attachments),
--- distinguished by `type` ('note'/'link') - merged from the former separate
--- aap_case_notes / aap_case_reference_links tables (same shape: case_id,
--- author, timestamp, plus content; always rendered together under the same
--- panel), see sql/2026-10-27_merge_case_notes_links.sql. A note's original
+-- aap_case_evidence
+-- All evidence added to a case (the "Evidence Attachments" / "Add New
+-- Evidence" panel on aap_update.php), one row per item, distinguished by
+-- `type`:
+--   'note' - uses `note`
+--   'file' - uses `file_name` + `stored_name` (corporate NAS path, see
+--            nas_config.php / lib/synologynas.php - files only ever touch
+--            local disk transiently under uploads/tmp/). `point_key` ('5',
+--            '4.1') is set when the file was uploaded through an
+--            Instruction point's own "Attach" input, so aap_update.php can
+--            show it under that point; NULL for general evidence.
+--            `template_id` (aap_case_type_templates.id) is set when the file
+--            was uploaded in a template's own slot (Fixit's Files rows), so
+--            the Evidence list can show that template's remark above it.
+--   'link' - uses `url` + `label`
+-- Merged from the former aap_case_notes / aap_case_reference_links /
+-- aap_case_attachments tables (see sql/2026-10-27_merge_case_notes_links.sql
+-- and sql/2026-10-28_merge_case_attachments_into_evidence.sql). The original
 -- aap_cases.evidence_note (captured at raise time) is separate from this
--- table. Subject to the same evidence-freeze rule as attachments
+-- table, and so are execution-only files (aap_case_execution_attachments).
+-- Every type follows the same evidence-freeze rule
 -- (aapCaseEvidenceItemEditable()) - only its own author can remove it, and
 -- only during the phase it was added in.
 -- --------------------------------------------------------
 
-CREATE TABLE `aap_case_evidence_notes` (
+CREATE TABLE `aap_case_evidence` (
   `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   `case_id` INT UNSIGNED NOT NULL,
-  `type` ENUM('note','link') NOT NULL,
+  `type` ENUM('note','file','link') NOT NULL,
   `note` TEXT NULL,
+  `file_name` VARCHAR(255) NULL,
+  `stored_name` VARCHAR(255) NULL,
+  `point_key` VARCHAR(20) NULL DEFAULT NULL,
+  `template_id` INT UNSIGNED NULL DEFAULT NULL,
   `url` TEXT NULL,
   `label` VARCHAR(150) NULL,
   `created_by` INT NOT NULL,
   `timestamp` DATETIME NOT NULL,
-  KEY `idx_aap_evidence_notes_case` (`case_id`),
-  KEY `idx_aap_evidence_notes_type` (`type`)
+  KEY `idx_aap_evidence_case` (`case_id`),
+  KEY `idx_aap_evidence_type` (`type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------

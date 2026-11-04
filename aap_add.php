@@ -119,7 +119,7 @@ if (isset($_POST['raise_case'])) {
     // required, in list order - see aapCaseTypeReplaceFieldConfig() in
     // aap_lib.php); re-checked here since the client-side handling in
     // js/aap_add.js never stops a tampered/direct POST.
-    $ordered_points = $ct ? aapCaseTypeFieldOrder($ct) : [];
+    $ordered_points = $ct ? aapCaseTypeFieldOrder($ct, $form_master_config) : [];
     $field_cfg = aapCaseTypeReplaceFieldConfig($form_master_config, $ordered_points);
     $extra_fields = array_values(array_filter($ordered_points, function ($p) { return $p['matched_field_key'] === null; }));
     // HTML form field names can't carry a literal '.' (PHP mangles it to
@@ -193,6 +193,9 @@ if (isset($_POST['raise_case'])) {
     } elseif (($instruction_field_error = aapValidateExtraInstructionFields($extra_fields, $instruction_answers_posted, $extra_attachment_present)) !== null) {
         $msg = $instruction_field_error;
         $msg_type = "alpro-danger";
+    } elseif (($matched_attach_error = aapValidateMatchedPointAttachments($ordered_points, $extra_attachment_present)) !== null) {
+        $msg = $matched_attach_error;
+        $msg_type = "alpro-danger";
     } else {
         // Requester Type / Requesting Channel are no longer collected on this
         // form - Requester Type falls back to 'customer' (Case Type no longer
@@ -260,6 +263,7 @@ if (isset($_POST['raise_case'])) {
 
             $case_ref = aapGenerateCaseRef($new_id);
             $conn->query("UPDATE aap_cases SET case_ref = '" . $conn->real_escape_string($case_ref) . "' WHERE id = " . $new_id);
+            aapSnapshotCaseInstructions($conn, $new_id, $ct);
 
             // Evidence uploads - stored on the corporate NAS, see aapUploadEvidenceFiles()
             $evidence_upload_result = aapUploadEvidenceFiles($conn, $new_id, $_FILES['evidence'] ?? null, $id_user, $now);
@@ -269,7 +273,7 @@ if (isset($_POST['raise_case'])) {
             // $_FILES entry keyed by point_key (js/aap_add.js's
             // buildExtraFieldWrap()) rather than the general Evidence
             // Attachments picker.
-            $extra_attachment_upload_result = aapUploadEvidenceFiles($conn, $new_id, $_FILES['extra_attachment'] ?? null, $id_user, $now);
+            $extra_attachment_upload_result = aapUploadEvidenceFiles($conn, $new_id, $_FILES['extra_attachment'] ?? null, $id_user, $now, true);
 
             // AAP-LINK: carry the original Fixit report's own attachments
             // over as this case's evidence too - same thing
@@ -458,7 +462,7 @@ if (isset($_POST['raise_case'])) {
                                     // (both built from the identical instructions JSON, so sort_order
                                     // lines up with the point's own order 1:1).
                                     $opt_is_linked = !empty($fixit_record['aap_case_type_id']) && (int)$fixit_record['aap_case_type_id'] === (int)$ct['id'];
-                                    $opt_ordered_points = aapCaseTypeFieldOrder($ct);
+                                    $opt_ordered_points = aapCaseTypeFieldOrder($ct, $form_master_config);
                                     if ($opt_is_linked && !empty($fixit_custom_fields)) {
                                         foreach ($opt_ordered_points as $opi => &$opp) {
                                             $opp['value'] = $fixit_custom_fields[$opi]['field_value'] ?? '';
