@@ -572,11 +572,11 @@ document.addEventListener('DOMContentLoaded', function () {
             // empty table there is correct, not an error.
             var level2HodOnly = document.getElementById('ct_level2_hod_only');
             var level3HodOnly = document.getElementById('ct_level3_hod_only');
+            // Level 2 left empty = skip it (straight to Level 3) - the server
+            // saves skip_approval=1 in that case, so no alert here.
             var skipApproval = document.getElementById('ct_skip_approval');
-            if (!approvalRows.length && !(level2HodOnly && level2HodOnly.checked) && !(skipApproval && skipApproval.checked)) {
-                e.preventDefault();
-                alert('At least one Group must be added under Level 2 - Approval Mode Assign.');
-                return;
+            if (!approvalRows.length && !(level2HodOnly && level2HodOnly.checked) && skipApproval && !skipApproval.disabled) {
+                skipApproval.checked = true;
             }
             if (!executionRows.length && !(level3HodOnly && level3HodOnly.checked)) {
                 e.preventDefault();

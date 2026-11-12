@@ -378,7 +378,12 @@ if (isset($_POST['save_case_type'])) {
             );
 
             // Skip Level 2 - same population as the HOD toggle above.
-            $skip_approval = $rights['can_reassign_level2'] ? (int)isset($_POST['skip_approval']) : (int)($existing_ct['skip_approval'] ?? 0);
+            // Leaving Level 2 empty (no Group, not HOD-only) also means skip.
+            $posted_level2_rows = json_decode($_POST['approval_tiers_json'] ?? '', true);
+            $level2_left_empty = empty($posted_level2_rows) && !$level2_is_hod;
+            $skip_approval = $rights['can_reassign_level2']
+                ? (int)(isset($_POST['skip_approval']) || $level2_left_empty)
+                : (int)($existing_ct['skip_approval'] ?? 0);
             $stmt = $conn->prepare("UPDATE aap_case_types SET skip_approval = ? WHERE id = ?");
             $stmt->bind_param("ii", $skip_approval, $target_ctid);
             $stmt->execute();
@@ -723,7 +728,7 @@ $aap_base = '../';
             <div class="aap-ct-field" style="grid-column: 1 / -1;">
                 <div class="aap-ct-field-inline" style="margin-bottom:8px;">
                     <input type="checkbox" name="skip_approval" id="ct_skip_approval" value="1" <?php echo !empty($edit_case_type['skip_approval']) ? 'checked' : ''; ?> <?php echo $edit_rights['can_reassign_level2'] ? '' : 'disabled'; ?>>
-                    <label for="ct_skip_approval" style="display:inline; font-weight:normal;">Skip Level 2 <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">No approval step for this Case Type. Once a case is submitted it's auto-approved at its calculated value and goes straight to Level 3 - Execution Team.</span></span></label>
+                    <label for="ct_skip_approval" style="display:inline; font-weight:normal;">Skip Level 2 <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">No approval step for this Case Type. Once a case is submitted it's auto-approved at its calculated value and goes straight to Level 3 - Execution Team. Leaving Level 2 empty (no Group, HOD Approval Only unticked) also skips it.</span></span></label>
                 </div>
                 <div id="ct_skip_note" style="display:none; padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057;">Level 2 is skipped - cases go straight to Level 3 (Execution).</div>
                 <div id="ct_level2_body">
