@@ -347,8 +347,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // the gap that used to require a separate Submit for Approval
             // click. aapSubmitCaseForApproval() is the one place eligible
             // approvers ever get notified (aap_lib.php).
-            aapSubmitCaseForApproval($conn, $id, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id'], $id_user, $now);
-            $msg = "Item tagged and confirmed. Submitted for approval."; $msg_type = "alpro-success";
+            $skipped = aapSubmitCaseForApproval($conn, $id, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id'], $id_user, $now);
+            $msg = $skipped ? "Item tagged and confirmed. Approval skipped - sent to Execution." : "Item tagged and confirmed. Submitted for approval."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'submit_for_approval' && $can_submit_for_approval) {
         // Manual fallback - normal cases are auto-submitted at raise time or
@@ -356,8 +356,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         // 'tag_physical' branch above), so this button shouldn't usually be
         // needed, but stays available for the rare case that somehow still
         // reaches Active without having been auto-submitted.
-        aapSubmitCaseForApproval($conn, $id, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id'], $id_user, $now);
-        $msg = "Case submitted for approval. Approvers notified."; $msg_type = "alpro-success";
+        $skipped = aapSubmitCaseForApproval($conn, $id, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id'], $id_user, $now);
+        $msg = $skipped ? "Approval skipped for this Case Type - sent to Execution." : "Case submitted for approval. Approvers notified."; $msg_type = "alpro-success";
     } elseif (in_array($action, ['approve', 'reject'], true) && $can_act_approval && $case['case_status'] === 'open' && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
         $physical_ok = in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
         if (!$physical_ok) {
@@ -795,7 +795,7 @@ if ($case['case_status'] === 'draft') {
 } elseif (in_array($case['case_status'], ['rejected', 'voided'], true)) {
     $astate = 'failed'; $asub = 'Rejected';
 } elseif (in_array($case['approval_status'], ['approved', 'corrected'], true)) {
-    $astate = 'done'; $asub = 'Approved';
+    $astate = 'done'; $asub = empty($case['approver_staff_id']) ? 'Skipped' : 'Approved';
 } elseif ($case['approval_status'] === 'pending') {
     $ready_for_approval = $physical_ready && $case['submitted_for_approval'];
     $astate = $ready_for_approval ? 'current' : 'upcoming';
@@ -1227,6 +1227,12 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                     <span class="aap-info-icon">i<span class="aap-tooltip">Approvable only by staff on this Case Type's Approval Staff Tier list, with a tier covering this value.</span></span>
                     <span style="margin-left:24px;">Status:</span> <span class="aap-pill <?php echo $approval_pill; ?>"><?php echo htmlspecialchars($approval_status_display['label']); ?></span>
                 </p>
+                <?php if (!$case['approver_name'] && empty($case['approver_staff_id']) && in_array($case['approval_status'], ['approved', 'corrected'], true)): ?>
+                    <p class="aap-meta-line">
+                        Level 2 skipped for this Case Type - auto-approved on <?php echo date('d-m-Y H:i', strtotime($case['approved_at'])); ?>
+                        <?php if ($case['approved_value'] !== null): ?> — Approved value: <?php echo aapFormatValue($case['approved_value'], $case['value_type']); ?><?php endif; ?>
+                    </p>
+                <?php endif; ?>
                 <?php if ($case['approver_name']): ?>
                     <?php $value_was_adjusted = $case['approved_value'] !== null && abs((float)$case['approved_value'] - (float)$case['calculated_value']) > 0.001; ?>
                     <p class="aap-meta-line">

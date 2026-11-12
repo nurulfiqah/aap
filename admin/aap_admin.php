@@ -377,8 +377,17 @@ if (isset($_POST['save_case_type'])) {
                 isset($_POST['level3_hod_only']), $rights['can_reassign_level3'], $existing_ct['level3_hod_only'] ?? 0
             );
 
+            // Skip Level 2 - same population as the HOD toggle above.
+            $skip_approval = $rights['can_reassign_level2'] ? (int)isset($_POST['skip_approval']) : (int)($existing_ct['skip_approval'] ?? 0);
+            $stmt = $conn->prepare("UPDATE aap_case_types SET skip_approval = ? WHERE id = ?");
+            $stmt->bind_param("ii", $skip_approval, $target_ctid);
+            $stmt->execute();
+            $stmt->close();
+
             $err = null;
-            if ($level2_is_hod) {
+            if ($skip_approval) {
+                // No Level 2 at all - nothing to save for its roster.
+            } elseif ($level2_is_hod) {
                 // No Staff Tier roster while HOD-only - clear any leftover
                 // rows from before it was turned on so nothing stale lingers.
                 $conn->query("DELETE FROM aap_case_type_staff_tiers WHERE case_type_id = " . (int)$target_ctid . " AND section = 'approval'");
@@ -712,6 +721,12 @@ $aap_base = '../';
         <p class="aap-ct-level-title">Level 2 - Approval Mode Assign<?php if (!$edit_rights['can_reassign_level2'] && !$edit_rights['can_edit_level2_group']): ?> <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">Only the department holding Level 2 can change this.</span></span><?php endif; ?></p>
         <div class="aap-ct-level aap-ct-level-2">
             <div class="aap-ct-field" style="grid-column: 1 / -1;">
+                <div class="aap-ct-field-inline" style="margin-bottom:8px;">
+                    <input type="checkbox" name="skip_approval" id="ct_skip_approval" value="1" <?php echo !empty($edit_case_type['skip_approval']) ? 'checked' : ''; ?> <?php echo $edit_rights['can_reassign_level2'] ? '' : 'disabled'; ?>>
+                    <label for="ct_skip_approval" style="display:inline; font-weight:normal;">Skip Level 2 <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">No approval step for this Case Type. Once a case is submitted it's auto-approved at its calculated value and goes straight to Level 3 - Execution Team.</span></span></label>
+                </div>
+                <div id="ct_skip_note" style="display:none; padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057;">Level 2 is skipped - cases go straight to Level 3 (Execution).</div>
+                <div id="ct_level2_body">
                 <label>Staff Tier <span style="color:red;">*</span></label>
                 <div class="aap-ct-field-inline" style="margin-bottom:8px;">
                     <input type="checkbox" name="level2_hod_only" id="ct_level2_hod_only" value="1" <?php echo !empty($edit_case_type['level2_hod_only']) ? 'checked' : ''; ?> <?php echo $edit_rights['can_reassign_level2'] ? '' : 'disabled'; ?>>
@@ -738,6 +753,7 @@ $aap_base = '../';
                 <?php if (!$edit_rights['can_edit_level2_group']): ?>
                 <div style="padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057;">Staff list hidden - only the department holding Level 2 (or an admin) can view it.</div>
                 <?php endif; ?>
+                </div>
             </div>
         </div>
 
@@ -854,7 +870,7 @@ $aap_base = '../';
             <td class="alpro-mono"><?php echo (int)$ct['id']; ?></td>
             <td><?php echo htmlspecialchars($ct['case_type_name']); ?></td>
             <td><?php echo htmlspecialchars($dept_name ?: '—'); ?></td>
-            <td><?php echo htmlspecialchars(aapCaseTypeSectionLabel($conn, $approval_tiers, $dept_names, !empty($ct['level2_hod_only']))); ?></td>
+            <td><?php echo !empty($ct['skip_approval']) ? 'Skipped' : htmlspecialchars(aapCaseTypeSectionLabel($conn, $approval_tiers, $dept_names, !empty($ct['level2_hod_only']))); ?></td>
             <td><?php echo htmlspecialchars(aapCaseTypeSectionLabel($conn, $execution_tiers, $dept_names, !empty($ct['level3_hod_only']))); ?></td>
             <td><?php echo $ct['physical_confirm_required'] ? 'Required' : '—'; ?></td>
             <td><?php echo $ct['recycle'] ? '<span class="alpro-badge alpro-badge-voided">Inactive</span>' : '<span class="alpro-badge alpro-badge-approved">Active</span>'; ?></td>

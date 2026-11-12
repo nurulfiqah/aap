@@ -239,6 +239,20 @@ document.addEventListener('DOMContentLoaded', function () {
     wireHodOnlyToggle('ct_level2_hod_only', 'ct_deptgroup_row', 'ct_hod_note', 'ct_staff_tier_wrap');
     wireHodOnlyToggle('ct_level3_hod_only', 'ct_deptgroup_row_lvl3', 'ct_hod_note_lvl3', 'ct_staff_tier_wrap_lvl3');
 
+    // Skip Level 2 - hides the whole Level 2 body (HOD toggle + roster).
+    (function () {
+        var skip = document.getElementById('ct_skip_approval');
+        var body = document.getElementById('ct_level2_body');
+        var note = document.getElementById('ct_skip_note');
+        if (!skip) return;
+        function apply() {
+            if (body) body.style.display = skip.checked ? 'none' : '';
+            if (note) note.style.display = skip.checked ? 'block' : 'none';
+        }
+        skip.addEventListener('change', apply);
+        apply();
+    })();
+
     // Editing an existing Case Type - prefill both tables from what's already
     // saved (AAP_ADMIN.approvalTiers/executionTiers, from aap_admin.php).
     if (!AAP_ADMIN.isNew) {
@@ -558,7 +572,8 @@ document.addEventListener('DOMContentLoaded', function () {
             // empty table there is correct, not an error.
             var level2HodOnly = document.getElementById('ct_level2_hod_only');
             var level3HodOnly = document.getElementById('ct_level3_hod_only');
-            if (!approvalRows.length && !(level2HodOnly && level2HodOnly.checked)) {
+            var skipApproval = document.getElementById('ct_skip_approval');
+            if (!approvalRows.length && !(level2HodOnly && level2HodOnly.checked) && !(skipApproval && skipApproval.checked)) {
                 e.preventDefault();
                 alert('At least one Group must be added under Level 2 - Approval Mode Assign.');
                 return;

@@ -1768,7 +1768,20 @@ function aapCaseOpenReadyErrors($case) {
 // completes (aap_update.php's 'tag_physical'), as well as from the manual
 // Submit for Approval button itself (kept as a fallback for the rare case
 // that somehow reaches Active without having been auto-submitted).
+// A Case Type with skip_approval set skips Level 2 entirely: the case is
+// approved here at its calculated value (approver_staff_id stays NULL - that
+// is how the UI tells "skipped" apart from a real approval) and lands
+// straight on Execution. Returns true when Level 2 was skipped.
 function aapSubmitCaseForApproval($conn, $case_id, $case_type_id, $calculated_value, $requester_department_id, $actor_id, $now) {
+    $ct = aapFetchCaseType($conn, $case_type_id);
+    if ($ct && !empty($ct['skip_approval'])) {
+        $approved_value = $calculated_value !== null && $calculated_value !== '' ? (float)$calculated_value : null;
+        $stmt = $conn->prepare("UPDATE aap_cases SET submitted_for_approval = 1, approval_status = 'approved', approved_value = ?, approver_staff_id = NULL, approved_at = ?, updated_at = ? WHERE id = ?");
+        $stmt->bind_param("dssi", $approved_value, $now, $now, $case_id);
+        $stmt->execute(); $stmt->close();
+        aapLogAudit($conn, $case_id, 'case_approved', $actor_id, "Level 2 (Approval) skipped for this Case Type - auto-approved, sent to Execution.", ['approved_value' => $approved_value]);
+        return true;
+    }
     $stmt = $conn->prepare("UPDATE aap_cases SET submitted_for_approval = 1, updated_at = ? WHERE id = ?");
     $stmt->bind_param("si", $now, $case_id);
     $stmt->execute(); $stmt->close();
@@ -1777,6 +1790,7 @@ function aapSubmitCaseForApproval($conn, $case_id, $case_type_id, $calculated_va
     foreach ($eligible as $approver_id) {
         aapNotifyStaff($conn, $case_id, $approver_id, 'pending_approval');
     }
+    return false;
 }
 
 // Stores $ct's current Instruction for User list on the case

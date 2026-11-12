@@ -144,6 +144,10 @@ CREATE TABLE `aap_case_types` (
   -- aap_lib.php.
   `level2_hod_only` TINYINT(1) NOT NULL DEFAULT 0,
   `level3_hod_only` TINYINT(1) NOT NULL DEFAULT 0,
+  -- Skip Level 2: a case of this type is auto-approved at its calculated
+  -- value the moment it's submitted and goes straight to Level 3
+  -- (Execution) - see aapSubmitCaseForApproval() in aap_lib.php.
+  `skip_approval` TINYINT(1) NOT NULL DEFAULT 0,
   `recycle` TINYINT(1) NOT NULL DEFAULT 0,
   `timestamp` DATETIME NOT NULL,
   KEY `idx_aap_case_types_department` (`department_id`)
