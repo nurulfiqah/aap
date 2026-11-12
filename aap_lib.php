@@ -364,30 +364,16 @@ function aapFetchGroupStaffTiers($conn, $department_id, $group_id) {
     $out = [];
     foreach ($tiers as $t) {
         $tier_row_id = (int)$t['id'];
+        // A real Group holds only staff manually assigned to it (Grouping
+        // Master's Assign) - no grade-default auto-membership.
         $stmt = $conn->prepare("
-            SELECT s.id, s.nama_staff AS name
-            FROM staff s
-            WHERE s.recycle != 1
-              AND FIND_IN_SET(?, s.department)
-              AND s.grade IN (
-                  SELECT tg.grade_id
-                  FROM aap_approval_unit_tier_grades tg
-                  JOIN aap_approval_unit_tiers ut ON ut.id = tg.tier_id
-                  WHERE ut.department_id IS NULL AND ut.tier_name = ?
-              )
-              AND s.id NOT IN (
-                  SELECT ts.staff_id
-                  FROM aap_approval_unit_tier_staff ts
-                  JOIN aap_approval_unit_tiers t2 ON t2.id = ts.tier_id
-                  WHERE t2.group_id = ?
-              )
-            UNION
             SELECT s2.id, s2.nama_staff AS name
             FROM aap_approval_unit_tier_staff ts2
             JOIN staff s2 ON s2.id = ts2.staff_id
-            WHERE ts2.tier_id = ?
+            WHERE ts2.tier_id = ? AND s2.recycle != 1
+            ORDER BY s2.nama_staff ASC
         ");
-        $stmt->bind_param("isii", $department_id, $t['tier_name'], $group_id, $tier_row_id);
+        $stmt->bind_param("i", $tier_row_id);
         $stmt->execute();
         $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $stmt->close();
@@ -926,7 +912,6 @@ function aapCaseSelectSql($where = '1=1', $order = 'c.timestamp DESC') {
                ct.department_id AS case_type_department_id,
                ctdept.depart_name AS case_type_department_name,
                fixit_o.code AS fixit_outlet_code,
-               fixit_r.report AS fixit_report,
                dept.depart_name AS requester_department_name,
                req.nama_staff AS requester_name,
                app.nama_staff AS approver_name,

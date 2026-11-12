@@ -138,31 +138,16 @@ function aapFetchTierGradesByName($conn, $tier_name) {
 // the same person can independently appear in a different Group too (a
 // staff member can belong to more than one Group within a department).
 function aapFetchDepartmentTierStaff($conn, $department_id, $group_id, $tier_row_id, $tier_name) {
+    // Manual-only: a Group's tier lists just the staff assigned to it here
+    // (Assign button) - no grade-default auto-membership.
     $stmt = $conn->prepare("
-        SELECT s.id, s.nama_staff AS name, 0 AS is_override
-        FROM staff s
-        WHERE s.recycle != 1
-          AND FIND_IN_SET(?, s.department)
-          AND s.grade IN (
-              SELECT tg.grade_id
-              FROM aap_approval_unit_tier_grades tg
-              JOIN aap_approval_unit_tiers t ON t.id = tg.tier_id
-              WHERE t.department_id IS NULL AND t.tier_name = ?
-          )
-          AND s.id NOT IN (
-              SELECT ts.staff_id
-              FROM aap_approval_unit_tier_staff ts
-              JOIN aap_approval_unit_tiers t2 ON t2.id = ts.tier_id
-              WHERE t2.group_id = ?
-          )
-        UNION
         SELECT s2.id, s2.nama_staff AS name, 1 AS is_override
         FROM aap_approval_unit_tier_staff ts2
         JOIN staff s2 ON s2.id = ts2.staff_id
-        WHERE ts2.tier_id = ?
+        WHERE ts2.tier_id = ? AND s2.recycle != 1
         ORDER BY name ASC
     ");
-    $stmt->bind_param("isii", $department_id, $tier_name, $group_id, $tier_row_id);
+    $stmt->bind_param("i", $tier_row_id);
     $stmt->execute();
     $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
@@ -484,6 +469,29 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_tier' && $_SERVER['R
         exit;
     }
 
+    // Unticking Unlimited (restore=1): go back to the value it had before
+    // it was made Unlimited (prev_tier_value), else the Universal list's
+    // value for the same tier name. Neither known -> ask for a value.
+    if (!$unlimited && ($_POST['restore'] ?? '') === '1') {
+        $stmt = $conn->prepare("SELECT prev_tier_value FROM aap_approval_unit_tiers WHERE id = ?");
+        $stmt->bind_param("i", $tier_id);
+        $stmt->execute();
+        $prev = $stmt->get_result()->fetch_assoc()['prev_tier_value'] ?? null;
+        $stmt->close();
+        if ($prev === null) {
+            $stmt = $conn->prepare("SELECT tier_value FROM aap_approval_unit_tiers WHERE department_id IS NULL AND group_id IS NULL AND tier_name = ? AND id != ? AND tier_value IS NOT NULL LIMIT 1");
+            $stmt->bind_param("si", $tier_name, $tier_id);
+            $stmt->execute();
+            $prev = $stmt->get_result()->fetch_assoc()['tier_value'] ?? null;
+            $stmt->close();
+        }
+        if ($prev === null) {
+            echo json_encode(['success' => false, 'need_value' => true]);
+            exit;
+        }
+        $tier_value = (float)$prev;
+    }
+
     // Tiers form a fixed ladder (Tier 0 lowest ... Unlimited highest, per
     // sort_order) - a tier's RM ceiling must stay between its immediate
     // neighbors' so the ladder never crosses itself (e.g. Tier 1 costing
@@ -539,12 +547,14 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_tier' && $_SERVER['R
         }
     }
 
-    $stmt = $conn->prepare("UPDATE aap_approval_unit_tiers SET tier_value = ?, updated_by = ?, timestamp = ? WHERE id = ? AND tier_name = ?");
+    // Remember the finite value being replaced, so unticking Unlimited
+    // later can restore it (see restore above).
+    $stmt = $conn->prepare("UPDATE aap_approval_unit_tiers SET prev_tier_value = COALESCE(tier_value, prev_tier_value), tier_value = ?, updated_by = ?, timestamp = ? WHERE id = ? AND tier_name = ?");
     $now = date('Y-m-d H:i:s');
     $stmt->bind_param("disis", $tier_value, $id_user, $now, $tier_id, $tier_name);
     $ok = $stmt->execute();
     $stmt->close();
-    echo json_encode(['success' => $ok]);
+    echo json_encode(['success' => $ok, 'tier_value' => $tier_value]);
     exit;
 }
 

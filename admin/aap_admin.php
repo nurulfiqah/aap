@@ -655,12 +655,13 @@ $aap_base = '../';
                     either Customer or Staff, never both) - ticking one side
                     disables the other via data-group. -->
                     <?php $fm_instr_groups = ['customer_name' => 'customer', 'customer_membership_id' => 'customer', 'staff_name' => 'staff']; ?>
+                    <?php $fm_config_labels = aapFetchFormMasterConfig($conn); // display only - data-field-label keeps the default for matching ?>
                     <div class="aap-modern">
                     <table class="alpro-table" width="100%" style="margin-bottom:10px;">
                         <tr><th>Field</th><th style="width:90px;">Add</th></tr>
                         <?php foreach (aapFormMasterFieldDefaults() as $fm_key => $fm_def): ?>
                             <tr>
-                                <td style="font-size:13px; padding-top:6px; padding-bottom:6px;"><?php echo htmlspecialchars($fm_def['label']); ?></td>
+                                <td style="font-size:13px; padding-top:6px; padding-bottom:6px;"><?php echo htmlspecialchars($fm_config_labels[$fm_key]['label'] ?? $fm_def['label']); ?></td>
                                 <td align="center" style="padding-top:6px; padding-bottom:6px;"><input type="checkbox" class="ct-instr-field-toggle" data-field-label="<?php echo htmlspecialchars($fm_def['label']); ?>" <?php echo isset($fm_instr_groups[$fm_key]) ? 'data-group="' . htmlspecialchars($fm_instr_groups[$fm_key]) . '"' : ''; ?>></td>
                             </tr>
                         <?php endforeach; ?>
@@ -776,7 +777,7 @@ $aap_base = '../';
                 <label>Staff Tier <span style="color:red;">*</span></label>
                 <div class="aap-ct-field-inline" style="margin-bottom:8px;">
                     <input type="checkbox" name="level3_hod_only" id="ct_level3_hod_only" value="1" <?php echo !empty($edit_case_type['level3_hod_only']) ? 'checked' : ''; ?> <?php echo $edit_rights['can_reassign_level3'] ? '' : 'disabled'; ?>>
-                    <label for="ct_level3_hod_only" style="display:inline; font-weight:normal;">HOD Approval Only <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">The Head of Department (from Alpro's HOD list) of whichever department actually raised the case becomes the sole executor for this level, for any value from 0 to Unlimited - resolved per case, not fixed here, so the same Case Type can route to a different HOD depending on who raised it. The Department/Group/Staff Tier roster below is ignored while this is checked.</span></span></label>
+                    <label for="ct_level3_hod_only" style="display:inline; font-weight:normal;">HOD Execution Only <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">The Head of Department (from Alpro's HOD list) of whichever department actually raised the case becomes the sole executor for this level, for any value from 0 to Unlimited - resolved per case, not fixed here, so the same Case Type can route to a different HOD depending on who raised it. The Department/Group/Staff Tier roster below is ignored while this is checked.</span></span></label>
                 </div>
                 <div id="ct_hod_note_lvl3" style="display:none; padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057; margin-bottom:8px;">Executor is resolved per case (the HOD of whoever raised it) - no department to pick here.</div>
                 <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;" id="ct_deptgroup_row_lvl3">

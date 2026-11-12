@@ -262,7 +262,7 @@ $active_tab = 'queue';
                     <input class="alpro-input" type="date" name="closed_date" value="<?php echo htmlspecialchars($f_closed_date); ?>">
                 </div>
                 <div class="alpro-field" style="grid-column: 1 / -1;">
-                    <label>Search (Ref / Transaction / Membership ID)</label>
+                    <label>Search (Ref / Invoice / Client Code / Member Card)</label>
                     <input class="alpro-input" type="text" name="q" value="<?php echo htmlspecialchars($f_search); ?>" placeholder="AAP-000123...">
                 </div>
                 <div class="alpro-actions" style="grid-column: 1 / -1; justify-content:flex-end;">
@@ -314,7 +314,6 @@ $active_tab = 'queue';
                 <th style="width:32px;"><input type="checkbox" id="export-select-all"></th>
                 <th>Case Ref</th>
                 <th>Case Type</th>
-                <th>Report</th>
                 <th style="text-align:center;">Verification Reference</th>
                 <th>Approval</th>
                 <th>Status</th>
@@ -339,8 +338,6 @@ $active_tab = 'queue';
                             <br><span class="alpro-muted" style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($outlet_label); ?></span>
                         <?php endif; ?>
                     </td>
-                    <?php // Report title straight from the linked Fixit ticket (fixit_record.report). ?>
-                    <td><?php echo $row['fixit_report'] !== null && $row['fixit_report'] !== '' ? htmlspecialchars(stripslashes($row['fixit_report'])) : '—'; ?></td>
                     <td style="text-align:center;">
                         <?php list($pc_icon, $pc_color) = aapPhysicalStatusIcon($row['physical_confirm_status']); ?>
                         <i class="bi <?php echo $pc_icon; ?>" style="color:<?php echo $pc_color; ?>; font-size:16px;" title="<?php echo htmlspecialchars(aapPhysicalStatusLabel($row['physical_confirm_status'])); ?>"></i>
@@ -361,7 +358,7 @@ $active_tab = 'queue';
                 <?php endwhile; ?>
             <?php else: ?>
                 <tr>
-                    <td colspan="10" align="center" style="padding: 15px;">No cases found for the current filter.</td>
+                    <td colspan="9" align="center" style="padding: 15px;">No cases found for the current filter.</td>
                 </tr>
             <?php endif; ?>
         </table>

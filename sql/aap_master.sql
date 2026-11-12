@@ -719,6 +719,9 @@ CREATE TABLE `aap_approval_unit_tiers` (
   `group_id` INT UNSIGNED NULL DEFAULT NULL,
   `tier_name` VARCHAR(100) NOT NULL,
   `tier_value` DECIMAL(12,2) NULL DEFAULT NULL,
+  -- Last finite tier_value before it was set to Unlimited - unticking
+  -- Unlimited restores this (admin/aap_grouping_master.php's update_tier).
+  `prev_tier_value` DECIMAL(12,2) NULL DEFAULT NULL,
   -- Dead column as of the 2026-09-03 redesign - add_tier (the only thing
   -- that ever set it) was removed along with free-form tier creation. Kept
   -- rather than dropped in case a free-form reason is wanted again later.

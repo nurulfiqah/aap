@@ -77,32 +77,35 @@ document.addEventListener('DOMContentLoaded', function () {
                 btn.addEventListener('click', function () { startEdit(btn.closest('tr')); });
             });
             // Ticking Unlimited saves immediately (no value needed);
-            // unticking it opens the row in the editor instead of guessing a
-            // value to save with.
+            // unticking it restores the value it had before (server-side
+            // prev_tier_value) - only opens the editor if none is known.
             tbody.querySelectorAll('.universal-tier-unlimited-toggle').forEach(function (cb) {
                 cb.addEventListener('change', guarded(function () {
                     var tr = cb.closest('tr');
                     var id = tr.getAttribute('data-id');
                     var name = tr.getAttribute('data-name');
-                    if (cb.checked) {
-                        return confirmTierImpact(null, name, 'edit').then(function (ok) {
-                            if (!ok) { cb.checked = false; return; }
-                            var body = new URLSearchParams();
-                            body.set('action', 'update_tier');
-                            body.set('id', id);
-                            body.set('tier_name', name);
-                            body.set('unlimited', '1');
-                            return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
-                                if (res.success) tr.setAttribute('data-value', '');
-                                else if (res.message) alert(res.message);
-                                render();
-                            });
+                    return confirmTierImpact(null, name, 'edit').then(function (ok) {
+                        if (!ok) { cb.checked = !cb.checked; return; }
+                        var body = new URLSearchParams();
+                        body.set('action', 'update_tier');
+                        body.set('id', id);
+                        body.set('tier_name', name);
+                        body.set('unlimited', cb.checked ? '1' : '0');
+                        if (!cb.checked) body.set('restore', '1');
+                        return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                            if (res.need_value) { startEdit(tr); return; }
+                            if (res.success) setTierValue(id, res.tier_value);
+                            else if (res.message) alert(res.message);
+                            render();
                         });
-                    } else {
-                        startEdit(tr);
-                    }
+                    });
                 }));
             });
+        }
+
+        // render() draws from `tiers`, so keep it in sync after a save.
+        function setTierValue(id, value) {
+            tiers.forEach(function (t) { if (String(t.id) === String(id)) t.tier_value = (value === null || value === undefined) ? null : value; });
         }
 
         function startEdit(tr) {
@@ -126,7 +129,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     body.set('unlimited', value === '' ? '1' : '0');
                     if (value !== '') body.set('tier_value', value);
                     return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
-                        if (res.success) tr.setAttribute('data-value', value);
+                        if (res.success) setTierValue(id, res.tier_value);
                         else if (res.message) alert(res.message);
                         render();
                     });
@@ -206,7 +209,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 + '</select>'
                 + '<button type="button" class="alpro-btn alpro-btn-blue group-assign-btn" style="white-space:nowrap; padding:3px 12px; font-size:12px;">Assign</button>'
                 + '</div>'
-                + '<p class="alpro-muted" style="font-size:12px; margin:0 0 10px;">Assigning a staff member to a tier here overrides their grade-default tier within this Group - they\'ll stop following their grade and stay on the tier picked, until unassigned.</p>'
+                + '<p class="alpro-muted" style="font-size:12px; margin:0 0 10px;">Only staff assigned here belong to this Group - pick a staff member and their tier, then Assign. Click &times; on a name to remove them.</p>'
                 + '<table class="alpro-table aap-ct-list-table" width="100%">'
                 + '<thead><tr><th>Tier</th><th>RM Value</th><th>Staff Name</th><th>Unlimited</th><th>Action</th></tr></thead>'
                 + '<tbody class="group-tbody">' + (g.tiers && g.tiers.length ? g.tiers.map(renderTierRow).join('') : '<tr><td colspan="5" class="alpro-muted">Not set up yet.</td></tr>') + '</tbody>'
@@ -218,7 +221,7 @@ document.addEventListener('DOMContentLoaded', function () {
         function renderTierRow(t) {
             var unlimitedChecked = t.tier_value === null;
             var staffHtml = (t.staff || []).map(function (s) {
-                var unassign = s.is_override ? '<span class="group-staff-unassign" data-tier-id="' + t.id + '" data-staff-id="' + s.id + '" title="Unassign - revert to grade default">&times;</span>' : '';
+                var unassign = s.is_override ? '<span class="group-staff-unassign" data-tier-id="' + t.id + '" data-staff-id="' + s.id + '" title="Remove from this Group">&times;</span>' : '';
                 return '<span class="aap-tier-staff-pill">' + esc(s.name) + unassign + '</span>';
             }).join('') || '<span class="alpro-muted">None</span>';
             return '<tr data-id="' + t.id + '" data-name="' + esc(t.tier_name) + '" data-value="' + (t.tier_value === null ? '' : t.tier_value) + '">'
@@ -286,30 +289,29 @@ document.addEventListener('DOMContentLoaded', function () {
                 var tr = cb.closest('tr');
                 var id = tr.getAttribute('data-id');
                 var name = tr.getAttribute('data-name');
-                if (cb.checked) {
-                    return confirmTierImpact(deptId, name, 'edit').then(function (ok) {
-                        if (!ok) { cb.checked = false; return; }
-                        var body = new URLSearchParams();
-                        body.set('action', 'update_tier');
-                        body.set('id', id);
-                        body.set('tier_name', name);
-                        body.set('unlimited', '1');
-                        return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
-                            if (!res.success) { cb.checked = false; if (res.message) alert(res.message); }
-                            load();
-                        });
+                // Unticking restores the value it had before Unlimited
+                // (server-side prev_tier_value) - editor only if none known.
+                return confirmTierImpact(deptId, name, 'edit').then(function (ok) {
+                    if (!ok) { cb.checked = !cb.checked; return; }
+                    var body = new URLSearchParams();
+                    body.set('action', 'update_tier');
+                    body.set('id', id);
+                    body.set('tier_name', name);
+                    body.set('unlimited', cb.checked ? '1' : '0');
+                    if (!cb.checked) body.set('restore', '1');
+                    return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                        if (res.need_value) { startEdit(tr); return; }
+                        if (!res.success && res.message) alert(res.message);
+                        load();
                     });
-                } else {
-                    startEdit(tr);
-                }
+                });
             }));
 
-            // Unassigning a manually-assigned staff member - revert to their
-            // grade-default tier within this Group.
+            // Removing an assigned staff member from this Group.
             tbody.addEventListener('click', guarded(function (e) {
                 if (!e.target.classList.contains('group-staff-unassign')) return;
                 var el = e.target;
-                if (!confirm('Unassign this staff member? They will revert to their grade-default tier.')) return;
+                if (!confirm('Remove this staff member from this Group?')) return;
                 var body = new URLSearchParams();
                 body.set('action', 'unassign_tier_staff');
                 body.set('tier_id', el.getAttribute('data-tier-id'));
@@ -370,11 +372,11 @@ document.addEventListener('DOMContentLoaded', function () {
             }));
         }
 
+        // Re-renders in place without hiding anything first, and puts the
+        // window back where it was - so Assign/Edit/Copy etc. don't throw
+        // the user back to the top of the page.
         function load() {
-            statusEl.textContent = 'Loading...';
-            customizeBtn.style.display = 'none';
-            revertBtn.style.display = 'none';
-            editSection.style.display = 'none';
+            var scrollY = window.scrollY;
 
             return fetch('?action=get_department_groups&department_id=' + encodeURIComponent(deptId))
                 .then(function (r) { return r.json(); })
@@ -383,13 +385,17 @@ document.addEventListener('DOMContentLoaded', function () {
                     renderDefaultTiers(res.default_tiers);
                     if (res.is_custom) {
                         statusEl.innerHTML = '<span class="alpro-badge alpro-badge-approved">Custom</span> This department has its own Group(s).';
+                        customizeBtn.style.display = 'none';
                         revertBtn.style.display = 'inline-block';
                         editSection.style.display = 'block';
                         renderGroups(res.groups);
                     } else {
                         statusEl.innerHTML = '<span class="alpro-badge alpro-badge-voided">Universal</span> This department follows the Universal tiers above.';
                         customizeBtn.style.display = 'inline-block';
+                        revertBtn.style.display = 'none';
+                        editSection.style.display = 'none';
                     }
+                    window.scrollTo(0, scrollY);
                 });
         }
 
