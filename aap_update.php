@@ -337,6 +337,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $stmt->bind_param("sisissi", $ref, $id_user, $now, $id_user, $now, $now, $id);
             $stmt->execute(); $stmt->close();
             aapLogAudit($conn, $id, 'physical_confirmed', $id_user, "Item tagged and confirmed (ref: $ref).");
+            // AAP-LINK: the verifier becomes the Fixit ticket's Staff In Charge.
+            if (!empty($case['fixit_record_id'])) {
+                aapSetLinkedFixitInCharge($conn, $case['fixit_record_id'], $id_user);
+            }
             // Physical confirmation is the last manual step for a case that
             // needed it - immediately also submit for approval (same as the
             // non-physical path auto-submits right at raise time), closing

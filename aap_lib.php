@@ -926,6 +926,7 @@ function aapCaseSelectSql($where = '1=1', $order = 'c.timestamp DESC') {
                ct.department_id AS case_type_department_id,
                ctdept.depart_name AS case_type_department_name,
                fixit_o.code AS fixit_outlet_code,
+               fixit_r.report AS fixit_report,
                dept.depart_name AS requester_department_name,
                req.nama_staff AS requester_name,
                app.nama_staff AS approver_name,
@@ -1080,7 +1081,7 @@ function aapSetLinkedFixitStatus($conn, $fixit_record_id, $actor_staff_id, $fix_
     // incentive/performance metric. Falls back to now() if the case row
     // can't be found for some reason, matching the old always-live-clock
     // behavior rather than failing the whole update.
-    $case_stmt = $conn->prepare("SELECT timestamp FROM aap_cases WHERE fixit_record_id = ? ORDER BY id DESC LIMIT 1");
+    $case_stmt = $conn->prepare("SELECT timestamp, physical_confirmed_by, physical_confirm_status FROM aap_cases WHERE fixit_record_id = ? ORDER BY id DESC LIMIT 1");
     $case_stmt->bind_param("i", $fixit_record_id);
     $case_stmt->execute();
     $case_row = $case_stmt->get_result()->fetch_assoc();
@@ -1088,12 +1089,32 @@ function aapSetLinkedFixitStatus($conn, $fixit_record_id, $actor_staff_id, $fix_
     $frozen_at = $case_row ? strtotime($case_row['timestamp']) : time();
 
     $efficiency = $frozen_at - strtotime($row['lodge']);
-    $incharge_id = (int)$row['lodge_op'];
+    // Staff In Charge = whoever confirmed the Verification Reference (RFID
+    // tag) on the AAP case, when there was one - see
+    // aapSetLinkedFixitInCharge(). Falls back to the ticket's own raiser.
+    $incharge_id = ($case_row && $case_row['physical_confirm_status'] === 'confirmed' && !empty($case_row['physical_confirmed_by']))
+        ? (int)$case_row['physical_confirmed_by']
+        : (int)$row['lodge_op'];
     $actor_staff_id = (int)$actor_staff_id;
     $fix_status = (int)$fix_status;
 
     $stmt = $conn->prepare("UPDATE fixit_record SET fix_status = ?, complete = ?, complete_op = ?, efficiency = ?, handled_by = 1, incharge_id = ? WHERE id = ?");
     $stmt->bind_param("isiiii", $fix_status, $complete, $actor_staff_id, $efficiency, $incharge_id, $fixit_record_id);
+    $stmt->execute();
+    $stmt->close();
+}
+
+// AAP-LINK: shows the staff member who confirmed the AAP case's
+// Verification Reference as the linked Fixit ticket's "Staff In Charge"
+// (handled_by = 1, incharge_id) right away, instead of the empty Contractor
+// picker. Only while the ticket is still open (fix_status 0), so a ticket
+// already resolved on the Fixit side is never touched.
+function aapSetLinkedFixitInCharge($conn, $fixit_record_id, $staff_id) {
+    $fixit_record_id = (int)$fixit_record_id;
+    $staff_id = (int)$staff_id;
+    if ($fixit_record_id <= 0 || $staff_id <= 0) return;
+    $stmt = $conn->prepare("UPDATE fixit_record SET handled_by = 1, incharge_id = ? WHERE id = ? AND fix_status = 0");
+    $stmt->bind_param("ii", $staff_id, $fixit_record_id);
     $stmt->execute();
     $stmt->close();
 }
