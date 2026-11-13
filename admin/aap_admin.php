@@ -262,11 +262,16 @@ function aapSaveCaseTypeHodOnly($conn, $case_type_id, $level, $posted_only, $can
 // select) is used instead, since it's bound to an existing aap_cases
 // column (see aapCaseTypeReplaceFieldConfig() in aap_lib.php).
 function aapSanitizeInstructionPointTypeOptions($row) {
-    $type = in_array($row['type'] ?? null, ['text', 'number', 'dropdown', 'date'], true) ? $row['type'] : 'text';
+    $type = in_array($row['type'] ?? null, ['text', 'number', 'dropdown', 'date', 'tick'], true) ? $row['type'] : 'text';
     $options = [];
+    // js/aap_admin.js sends options as an array; a plain newline-separated
+    // string is accepted too. (Casting the array straight to string used to
+    // save every dropdown's options as just "Array".)
+    $raw_options = $row['options'] ?? '';
+    $raw_options = is_array($raw_options) ? $raw_options : preg_split('/\r\n|\r|\n/', (string)$raw_options);
     if ($type === 'dropdown') {
-        foreach (preg_split('/\r\n|\r|\n/', (string)($row['options'] ?? '')) as $opt) {
-            $opt = trim($opt);
+        foreach ($raw_options as $opt) {
+            $opt = trim((string)$opt);
             if ($opt !== '' && !in_array($opt, $options, true)) $options[] = $opt;
         }
         // A dropdown with no real options left can't be answered - fall

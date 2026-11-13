@@ -324,6 +324,10 @@ document.addEventListener('DOMContentLoaded', function () {
             inputHtml = '<input class="alpro-input" type="number" step="any" name="' + name + '" ' + reqAttr + '>';
         } else if (point.type === 'date') {
             inputHtml = '<input class="alpro-input" type="date" name="' + name + '" ' + reqAttr + '>';
+        } else if (point.type === 'tick') {
+            // The point's own label is the sentence - just the tick box
+            // here. Ticked = "Yes"; required = must be ticked to submit.
+            inputHtml = '<input type="checkbox" name="' + name + '" value="Yes" style="width:18px; height:18px; flex:0 0 auto; margin:0;" ' + reqAttr + '>';
         } else if (point.type === 'dropdown' && point.options && point.options.length) {
             inputHtml = '<select class="alpro-input" name="' + name + '" ' + reqAttr + '><option value="">Select</option>' +
                 point.options.map(function (o) { return '<option value="' + escapeHtml(o) + '">' + escapeHtml(o) + '</option>'; }).join('') +
@@ -340,6 +344,12 @@ document.addEventListener('DOMContentLoaded', function () {
         if (point.requires_attachment) {
             var attachName = 'extra_attachment[' + escapeHtml(point.key.replace(/\./g, '_')) + ']';
             attachHtml = '<div style="margin-top:4px;"><input class="alpro-input" type="file" name="' + attachName + '" required></div>';
+        }
+        if (point.type === 'tick') {
+            // Tick box first, then the sentence - one line, no separate label.
+            wrap.innerHTML = '<label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:normal;">' + inputHtml +
+                '<span>' + escapeHtml(point.label) + ' ' + (req ? '<span class="aap-req">*</span>' : '') + '</span></label>' + attachHtml;
+            return wrap;
         }
         wrap.innerHTML = '<label>' + escapeHtml(point.label) + ' ' + (req ? '<span class="aap-req">*</span>' : '') + '</label>' + inputHtml + attachHtml;
         return wrap;

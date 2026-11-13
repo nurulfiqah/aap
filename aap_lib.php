@@ -1324,7 +1324,7 @@ function aapFormMasterLockedKeys() {
 // no type/options keys at all (both default to 'text'/[]).
 function aapNormalizeInstructionPoint($row) {
     $row = is_array($row) ? $row : ['text' => (string)$row];
-    $type = in_array($row['type'] ?? null, ['text', 'number', 'dropdown', 'date'], true) ? $row['type'] : 'text';
+    $type = in_array($row['type'] ?? null, ['text', 'number', 'dropdown', 'date', 'tick'], true) ? $row['type'] : 'text';
     $options = ($type === 'dropdown' && is_array($row['options'] ?? null)) ? array_values(array_filter(array_map('trim', $row['options']))) : [];
     if ($type === 'dropdown' && empty($options)) $type = 'text';
     // Defaults to true for backward compatibility - every point saved before

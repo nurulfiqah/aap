@@ -1154,8 +1154,19 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         $op_required = ($op_key !== null) || ($op['required'] ?? true); ?>
                         <div class="aap-form-grid">
                             <div class="alpro-field aap-span-3">
+                                <?php if ($op_key === null && $op['type'] === 'tick'): ?>
+                                    <?php // Tick box first, then the sentence - one line, no separate label. Hidden '' first so unticking saves blank. ?>
+                                    <input type="hidden" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" value="">
+                                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:normal;">
+                                        <input type="checkbox" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" value="Yes" style="width:18px; height:18px; flex:0 0 auto; margin:0;" <?php echo ($instruction_answers_by_key[$op['key']] ?? '') !== '' ? 'checked' : ''; ?> <?php echo $op_required ? 'required' : ''; ?>>
+                                        <span><?php echo htmlspecialchars($op['label']); ?> <?php if ($op_required): ?><span class="aap-req">*</span><?php endif; ?></span>
+                                    </label>
+                                <?php else: ?>
                                 <label><?php echo htmlspecialchars($op['label']); ?> <?php if ($op_required): ?><span class="aap-req">*</span><?php endif; ?></label>
-                                <?php if ($op_key === 'customer_name'): ?>
+                                <?php endif; ?>
+                                <?php if ($op_key === null && $op['type'] === 'tick'): ?>
+                                    <?php // rendered above ?>
+                                <?php elseif ($op_key === 'customer_name'): ?>
                                     <input class="alpro-input" type="text" name="customer_name" value="<?php echo htmlspecialchars($case['customer_name'] ?? ''); ?>" readonly>
                                 <?php elseif ($op_key === 'customer_membership_id'): ?>
                                     <input class="alpro-input" type="text" value="<?php echo htmlspecialchars($case['customer_membership_id'] ?? ''); ?>" readonly>

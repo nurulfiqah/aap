@@ -313,7 +313,7 @@ document.addEventListener('DOMContentLoaded', function () {
             p = (typeof p === 'string') ? { text: p } : (p || {});
             return {
                 text: p.text || '',
-                type: ['text', 'number', 'dropdown', 'date'].indexOf(p.type) !== -1 ? p.type : 'text',
+                type: ['text', 'number', 'dropdown', 'date', 'tick'].indexOf(p.type) !== -1 ? p.type : 'text',
                 options: (p.options || []).slice(),
                 required: p.required !== false,
                 // Asks for a supporting file alongside this point's own
@@ -338,7 +338,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         function typeSelectHtml(selectedType) {
-            var opts = [['text', 'Text'], ['number', 'Number'], ['dropdown', 'Dropdown'], ['date', 'Date']];
+            var opts = [['text', 'Text'], ['number', 'Number'], ['dropdown', 'Dropdown'], ['date', 'Date'], ['tick', 'Tick']];
             var html = '<select class="alpro-input aap-instr-type" style="height:32px; padding:2px 6px; font-size:12px; width:110px;" ' + (readonly ? 'disabled' : '') + '>';
             opts.forEach(function (o) {
                 html += '<option value="' + o[0] + '"' + (o[0] === selectedType ? ' selected' : '') + '>' + o[1] + '</option>';
@@ -374,6 +374,9 @@ document.addEventListener('DOMContentLoaded', function () {
             wrapEl.parentNode.insertBefore(optionsWrap, wrapEl.nextSibling);
             if (!readonly) {
                 typeSelect.addEventListener('change', function (e) {
+                    // Options only belong to a dropdown - don't carry them
+                    // into another type.
+                    if (e.target.value !== 'dropdown') point.options = [];
                     point.type = e.target.value;
                     onChange();
                 });
@@ -391,6 +394,13 @@ document.addEventListener('DOMContentLoaded', function () {
                     });
                 }
             }
+        }
+
+        // Tick type: the point's own text IS the sentence - a preview tick
+        // box sits right before it, same as the user will see it.
+        function tickPreviewHtml(point, matched) {
+            if (matched || point.type !== 'tick') return '';
+            return '<input type="checkbox" disabled title="Tick box - the user ticks this" style="width:16px; height:16px; flex:0 0 auto; margin:0;">';
         }
 
         // A Form Master row gets no renderPointExtras() (no Type/Options/
@@ -435,6 +445,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     '<div style="display:flex; gap:8px; align-items:center; margin-top:' + (mi === 0 ? '0' : '10px') + ';">' +
                     (readonly ? '' : '<span style="display:flex; gap:2px;">' + moveBtnsHtml(mi, data.length, false) + '</span>') +
                     '<span style="font-weight:600; font-size:12px; min-width:28px;">' + (mi + 1) + '.</span>' +
+                    tickPreviewHtml(main, mainMatched) +
                     '<input type="text" class="alpro-input" placeholder="Main point" value="' + esc(main.text) + '" style="flex:1; height:32px; padding:4px 8px; font-size:13px;" ' + (readonly ? 'disabled' : '') + '>' +
                     (mainMatched ? '' : typeSelectHtml(main.type) + requiredCheckboxHtml(main.required)) + requiresAttachmentCheckboxHtml(main.requires_attachment) +
                     (readonly ? '' :
@@ -460,6 +471,7 @@ document.addEventListener('DOMContentLoaded', function () {
                             '<div style="display:flex; gap:8px; align-items:center; margin-top:4px;">' +
                             (readonly ? '' : '<span style="display:flex; gap:2px;">' + moveBtnsHtml(si, main.subs.length, true) + '</span>') +
                             '<span style="font-size:12px; color:#6c757d; min-width:36px;">' + (mi + 1) + '.' + (si + 1) + '</span>' +
+                            tickPreviewHtml(sub, subMatched) +
                             '<input type="text" class="alpro-input" placeholder="Sub point" value="' + esc(sub.text) + '" style="flex:1; height:30px; padding:4px 8px; font-size:12px;" ' + (readonly ? 'disabled' : '') + '>' +
                             (subMatched ? '' : typeSelectHtml(sub.type) + requiredCheckboxHtml(sub.required)) + requiresAttachmentCheckboxHtml(sub.requires_attachment) +
                             (readonly ? '' : '<button type="button" class="alpro-btn alpro-btn-grey aap-instr-remove-sub" style="padding:2px 7px; font-size:11px;">&times;</button>') +
