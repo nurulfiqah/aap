@@ -190,7 +190,7 @@ CREATE TABLE `aap_form_master_config` (
 CREATE TABLE `aap_custom_fields` (
   `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   `label` VARCHAR(150) NOT NULL,
-  `field_type` ENUM('number','dropdown','textarea') NOT NULL,
+  `field_type` ENUM('number','dropdown','textarea','date') NOT NULL,
   `options` TEXT NULL DEFAULT NULL,
   `required` TINYINT(1) NOT NULL DEFAULT 0,
   `sort_order` INT NOT NULL DEFAULT 0,

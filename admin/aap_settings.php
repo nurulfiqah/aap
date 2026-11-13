@@ -297,7 +297,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_custom_field' && $_SERV
     $label = trim($_POST['label'] ?? '');
     $field_type = $_POST['field_type'] ?? '';
     $required = (int)($_POST['required'] ?? 0) === 1 ? 1 : 0;
-    if ($label === '' || !in_array($field_type, ['number', 'dropdown', 'textarea'], true)) {
+    if ($label === '' || !in_array($field_type, ['number', 'dropdown', 'textarea', 'date'], true)) {
         echo json_encode(['success' => false, 'message' => 'Label and a valid Type are required.']);
         exit;
     }
@@ -450,6 +450,7 @@ $aap_base = '../';
                     <option value="number">Number</option>
                     <option value="dropdown">Dropdown</option>
                     <option value="textarea">Textarea</option>
+                    <option value="date">Date</option>
                 </select>
             </div>
             <div class="alpro-field" style="flex:0 0 auto;">

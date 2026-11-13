@@ -950,7 +950,8 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                 <?php if ($fixit_record): ?>
                     <div class="aap-fact-row">
                         <div class="alpro-field"><label>Category</label><div><?php echo htmlspecialchars($fixit_record['category_name'] ?: '—'); ?></div></div>
-                        <div class="alpro-field"><label>Department</label><div><?php echo htmlspecialchars($fixit_record['department_name'] ?: '—'); ?></div></div>
+                        <?php // The Fixit ticket's own department is always the "AAP" wildcard - show the Case Type's own (Level 1) department instead. ?>
+                        <div class="alpro-field"><label>Department</label><div><?php echo htmlspecialchars(($case['case_type_department_name'] ?? '') ?: ($fixit_record['department_name'] ?: '—')); ?></div></div>
                         <div class="alpro-field"><label>Outlet</label><div><?php echo htmlspecialchars($fixit_record['outlet_code'] ?: '—'); ?></div></div>
                         <div class="alpro-field"><label>Lodged By</label><div><?php echo htmlspecialchars($fixit_record['lodged_by_name'] ?: '—'); ?> on <?php echo $fixit_record['lodge'] ? date('d-m-Y H:i', strtotime($fixit_record['lodge'])) : '—'; ?></div></div>
                     </div>
@@ -1028,7 +1029,11 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         elseif ($op_key === 'bank_name') { $op_value = $case['bank_name'] ?: '—'; }
                         elseif ($op_key === 'bank_account_number') { $op_value = $case['bank_account_number'] ?: '—'; }
                         elseif ($op_key === 'bank_account_holder') { $op_value = $case['bank_account_holder'] ?: '—'; }
-                        else { $op_value = $instruction_answers_by_key[$op['key']] ?? '—'; } ?>
+                        else {
+                            $op_value = $instruction_answers_by_key[$op['key']] ?? '—';
+                            // Date points are stored Y-m-d - shown d-m-Y like the rest of AAP.
+                            if (($op['type'] ?? '') === 'date' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $op_value)) $op_value = date('d-m-Y', strtotime($op_value));
+                        } ?>
                         <div class="aap-form-grid">
                             <div class="alpro-field aap-span-3">
                                 <label><?php echo htmlspecialchars($op['label']); ?></label>
@@ -1060,7 +1065,10 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         <?php foreach ($display_custom_fields as $dcf): ?>
                             <div class="alpro-field">
                                 <label><?php echo htmlspecialchars($dcf['label']); ?></label>
-                                <div><?php echo $dcf['field_type'] === 'textarea' ? nl2br(htmlspecialchars($dcf['value'] ?: '—')) : htmlspecialchars($dcf['value'] !== null && $dcf['value'] !== '' ? $dcf['value'] : '—'); ?></div>
+                                <div><?php
+                                    if ($dcf['field_type'] === 'date' && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$dcf['value'])) echo date('d-m-Y', strtotime($dcf['value']));
+                                    else echo $dcf['field_type'] === 'textarea' ? nl2br(htmlspecialchars($dcf['value'] ?: '—')) : htmlspecialchars($dcf['value'] !== null && $dcf['value'] !== '' ? $dcf['value'] : '—');
+                                ?></div>
                             </div>
                         <?php endforeach; ?>
                     </div>
@@ -1175,6 +1183,8 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                                     <input class="alpro-input" type="text" name="bank_account_holder" value="<?php echo htmlspecialchars($case['bank_account_holder'] ?? ''); ?>" required>
                                 <?php elseif ($op['type'] === 'number'): ?>
                                     <input class="alpro-input" type="number" step="any" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" value="<?php echo htmlspecialchars($instruction_answers_by_key[$op['key']] ?? ''); ?>" <?php echo $op_required ? 'required' : ''; ?>>
+                                <?php elseif ($op['type'] === 'date'): ?>
+                                    <input class="alpro-input" type="date" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" value="<?php echo htmlspecialchars($instruction_answers_by_key[$op['key']] ?? ''); ?>" <?php echo $op_required ? 'required' : ''; ?>>
                                 <?php elseif ($op['type'] === 'dropdown' && !empty($op['options'])): ?>
                                     <select class="alpro-input" name="instruction_answer[<?php echo htmlspecialchars(str_replace('.', '_', $op['key'])); ?>]" <?php echo $op_required ? 'required' : ''; ?>>
                                         <option value="">Select</option>
@@ -1199,6 +1209,8 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                                 <label><?php echo htmlspecialchars($cf['label']); ?> <?php if ($cf['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
                                 <?php if ($cf['field_type'] === 'number'): ?>
                                     <input class="alpro-input" type="number" step="any" name="custom_field[<?php echo (int)$cf['id']; ?>]" value="<?php echo htmlspecialchars($cf_current); ?>" <?php echo $cf['required'] ? 'required' : ''; ?>>
+                                <?php elseif ($cf['field_type'] === 'date'): ?>
+                                    <input class="alpro-input" type="date" name="custom_field[<?php echo (int)$cf['id']; ?>]" value="<?php echo htmlspecialchars($cf_current); ?>" <?php echo $cf['required'] ? 'required' : ''; ?>>
                                 <?php elseif ($cf['field_type'] === 'dropdown'): ?>
                                     <select class="alpro-input" name="custom_field[<?php echo (int)$cf['id']; ?>]" <?php echo $cf['required'] ? 'required' : ''; ?>>
                                         <option value="">Select</option>

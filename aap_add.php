@@ -562,6 +562,8 @@ if (isset($_POST['raise_case'])) {
                                 <label><?php echo htmlspecialchars($cf['label']); ?> <?php if ($cf['required']): ?><span class="aap-req">*</span><?php endif; ?></label>
                                 <?php if ($cf['field_type'] === 'number'): ?>
                                     <input class="alpro-input" type="number" step="any" name="custom_field[<?php echo (int)$cf['id']; ?>]" <?php echo $cf['required'] ? 'required' : ''; ?>>
+                                <?php elseif ($cf['field_type'] === 'date'): ?>
+                                    <input class="alpro-input" type="date" name="custom_field[<?php echo (int)$cf['id']; ?>]" <?php echo $cf['required'] ? 'required' : ''; ?>>
                                 <?php elseif ($cf['field_type'] === 'dropdown'): ?>
                                     <select class="alpro-input" name="custom_field[<?php echo (int)$cf['id']; ?>]" <?php echo $cf['required'] ? 'required' : ''; ?>>
                                         <option value="">Select</option>

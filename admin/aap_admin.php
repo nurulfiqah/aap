@@ -262,7 +262,7 @@ function aapSaveCaseTypeHodOnly($conn, $case_type_id, $level, $posted_only, $can
 // select) is used instead, since it's bound to an existing aap_cases
 // column (see aapCaseTypeReplaceFieldConfig() in aap_lib.php).
 function aapSanitizeInstructionPointTypeOptions($row) {
-    $type = in_array($row['type'] ?? null, ['text', 'number', 'dropdown'], true) ? $row['type'] : 'text';
+    $type = in_array($row['type'] ?? null, ['text', 'number', 'dropdown', 'date'], true) ? $row['type'] : 'text';
     $options = [];
     if ($type === 'dropdown') {
         foreach (preg_split('/\r\n|\r|\n/', (string)($row['options'] ?? '')) as $opt) {
@@ -663,6 +663,13 @@ $aap_base = '../';
                             <tr>
                                 <td style="font-size:13px; padding-top:6px; padding-bottom:6px;"><?php echo htmlspecialchars($fm_config_labels[$fm_key]['label'] ?? $fm_def['label']); ?></td>
                                 <td align="center" style="padding-top:6px; padding-bottom:6px;"><input type="checkbox" class="ct-instr-field-toggle" data-field-label="<?php echo htmlspecialchars($fm_def['label']); ?>" <?php echo isset($fm_instr_groups[$fm_key]) ? 'data-group="' . htmlspecialchars($fm_instr_groups[$fm_key]) . '"' : ''; ?>></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        <?php // Not Form Master fields - quick-add a point already set to the Date (calendar) type, see js/aap_admin.js. ?>
+                        <?php foreach (['Start Date', 'End Date'] as $date_label): ?>
+                            <tr>
+                                <td style="font-size:13px; padding-top:6px; padding-bottom:6px;"><?php echo htmlspecialchars($date_label); ?> <span class="alpro-muted" style="font-size:11px;">(calendar)</span></td>
+                                <td align="center" style="padding-top:6px; padding-bottom:6px;"><input type="checkbox" class="ct-instr-date-toggle" data-field-label="<?php echo htmlspecialchars($date_label); ?>"></td>
                             </tr>
                         <?php endforeach; ?>
                     </table>

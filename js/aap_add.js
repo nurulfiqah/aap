@@ -322,6 +322,8 @@ document.addEventListener('DOMContentLoaded', function () {
         var inputHtml;
         if (point.type === 'number') {
             inputHtml = '<input class="alpro-input" type="number" step="any" name="' + name + '" ' + reqAttr + '>';
+        } else if (point.type === 'date') {
+            inputHtml = '<input class="alpro-input" type="date" name="' + name + '" ' + reqAttr + '>';
         } else if (point.type === 'dropdown' && point.options && point.options.length) {
             inputHtml = '<select class="alpro-input" name="' + name + '" ' + reqAttr + '><option value="">Select</option>' +
                 point.options.map(function (o) { return '<option value="' + escapeHtml(o) + '">' + escapeHtml(o) + '</option>'; }).join('') +

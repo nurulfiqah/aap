@@ -286,6 +286,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // text, so manually retyping a Main Point away from a field's label
         // just stops that checkbox tracking it (see syncFieldToggles() below).
         var fieldToggles = Array.prototype.slice.call(document.querySelectorAll('.ct-instr-field-toggle'));
+        var dateToggles = Array.prototype.slice.call(document.querySelectorAll('.ct-instr-date-toggle'));
 
         // Same exact-label match aap_lib.php's aapCaseTypeFieldOrder() uses
         // server-side (against Form Master's DEFAULT labels, not whatever
@@ -312,7 +313,7 @@ document.addEventListener('DOMContentLoaded', function () {
             p = (typeof p === 'string') ? { text: p } : (p || {});
             return {
                 text: p.text || '',
-                type: ['text', 'number', 'dropdown'].indexOf(p.type) !== -1 ? p.type : 'text',
+                type: ['text', 'number', 'dropdown', 'date'].indexOf(p.type) !== -1 ? p.type : 'text',
                 options: (p.options || []).slice(),
                 required: p.required !== false,
                 // Asks for a supporting file alongside this point's own
@@ -337,7 +338,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         function typeSelectHtml(selectedType) {
-            var opts = [['text', 'Text'], ['number', 'Number'], ['dropdown', 'Dropdown']];
+            var opts = [['text', 'Text'], ['number', 'Number'], ['dropdown', 'Dropdown'], ['date', 'Date']];
             var html = '<select class="alpro-input aap-instr-type" style="height:32px; padding:2px 6px; font-size:12px; width:110px;" ' + (readonly ? 'disabled' : '') + '>';
             opts.forEach(function (o) {
                 html += '<option value="' + o[0] + '"' + (o[0] === selectedType ? ' selected' : '') + '>' + o[1] + '</option>';
@@ -489,8 +490,30 @@ document.addEventListener('DOMContentLoaded', function () {
                 var label = cb.dataset.fieldLabel;
                 cb.checked = data.some(function (m) { return m.text.trim() === label; });
             });
+            dateToggles.forEach(function (cb) {
+                var label = cb.dataset.fieldLabel;
+                cb.checked = data.some(function (m) { return m.text.trim() === label && m.type === 'date'; });
+            });
             applyGroupExclusivity();
         }
+
+        // Start Date / End Date quick-add - not Form Master fields, just a
+        // Main Point pre-set to the Date (calendar) type.
+        dateToggles.forEach(function (cb) {
+            cb.addEventListener('change', function () {
+                var label = cb.dataset.fieldLabel;
+                if (cb.checked) {
+                    if (!data.some(function (m) { return m.text.trim() === label; })) {
+                        var point = normalizePoint({ text: label, type: 'date' });
+                        point.subs = [];
+                        data.push(point);
+                    }
+                } else {
+                    data = data.filter(function (m) { return !(m.text.trim() === label && m.type === 'date'); });
+                }
+                render();
+            });
+        });
 
         // Customer Name/Membership ID ("customer" group) and Staff Name
         // ("staff" group) are mutually exclusive - a case is either Customer
